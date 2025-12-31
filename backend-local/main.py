@@ -50,7 +50,7 @@ async def shutdown_event():
     if http_client:
         await http_client.aclose()
 
-@app.post("/api/getMyData")
+@app.post("/api/GetMyData")
 async def get_my_data(data: dict):
     """Authenticate with ssoid token and get user packages"""
     try:
