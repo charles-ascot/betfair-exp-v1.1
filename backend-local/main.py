@@ -196,14 +196,13 @@ async def download_list_of_files(filter_data: dict):
             "toDay": int(filter_data.get("toDay", 31)),
             "toMonth": int(filter_data.get("toMonth", 12)),
             "toYear": int(filter_data.get("toYear", 2024)),
-            "eventId": None,
-            "eventName": None,
             "marketTypesCollection": filter_data.get("marketTypesCollection", []),
             "countriesCollection": filter_data.get("countriesCollection", []),
             "fileTypeCollection": filter_data.get("fileTypeCollection", [])
         }
-        
+
         logger.info(f"DownloadListOfFiles request: {request_body}")
+        logger.info(f"DownloadListOfFiles headers: ssoid={ssoid[:10]}...")
 
         response = await http_client.post(
             f"{HISTORIC_DATA_BASE}/DownloadListOfFiles",
@@ -213,6 +212,11 @@ async def download_list_of_files(filter_data: dict):
 
         logger.info(f"DownloadListOfFiles response: {response.status_code}")
         logger.info(f"DownloadListOfFiles response body (first 1000 chars): {response.text[:1000]}")
+
+        # Check if response is an HTML error page
+        if '<html' in response.text.lower() or '<!doctype' in response.text.lower():
+            logger.error(f"DownloadListOfFiles returned HTML error page")
+            raise HTTPException(status_code=502, detail="Betfair API returned an error page. Session may have expired.")
 
         if response.status_code != 200:
             logger.error(f"DownloadListOfFiles returned {response.status_code}: {response.text[:500]}")
