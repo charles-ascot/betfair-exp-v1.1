@@ -9,6 +9,16 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://betfair1.thync.online", "http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
