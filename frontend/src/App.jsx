@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import axios from 'axios';
 import './App.css';
 
-const API_BASE = 'http://localhost:8000/api';
+const API_BASE = 'https://betfair-backend-1026419041222.us-central1.run.app';
 
 export default function App() {
   const [ssoid, setSsoid] = useState('');
