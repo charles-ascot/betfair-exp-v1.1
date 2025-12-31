@@ -212,7 +212,7 @@ async def download_list_of_files(filter_data: dict):
         )
 
         logger.info(f"DownloadListOfFiles response: {response.status_code}")
-        logger.info(f"DownloadListOfFiles response body (first 500 chars): {response.text[:500]}")
+        logger.info(f"DownloadListOfFiles response body (first 1000 chars): {response.text[:1000]}")
 
         if response.status_code != 200:
             logger.error(f"DownloadListOfFiles returned {response.status_code}: {response.text[:500]}")
@@ -222,7 +222,20 @@ async def download_list_of_files(filter_data: dict):
         if not response.text or response.text.strip() == "":
             return []
 
-        return response.json()
+        # The response might be a list of file paths as plain text (one per line)
+        # or CSV format with headers
+        try:
+            return response.json()
+        except Exception as json_err:
+            logger.warning(f"Response is not JSON, trying to parse as text lines: {json_err}")
+            # Parse as newline-separated file list, skip potential header row
+            lines = [line.strip() for line in response.text.strip().split('\n') if line.strip()]
+            # If first line looks like a header (contains common header words), skip it
+            if lines and any(h in lines[0].lower() for h in ['file', 'path', 'name', 'url']):
+                lines = lines[1:]
+            # Filter out any empty lines or lines that don't look like file paths
+            file_list = [line for line in lines if line and '/' in line or '.' in line]
+            return file_list if file_list else lines
     
     except HTTPException:
         raise
