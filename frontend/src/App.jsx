@@ -42,7 +42,7 @@ export default function App() {
     setError('');
 
     try {
-      const response = await axios.post(`${API_BASE}/getMyData`, { ssoid });
+      const response = await axios.post(`${API_BASE}/GetMyData`, { ssoid });
       if (response.status === 200) {
         setIsLoggedIn(true);
       }
@@ -58,7 +58,7 @@ export default function App() {
     setError('');
 
     try {
-      const response = await axios.post(`${API_BASE}/getCollectionOptions`, {
+      const response = await axios.post(`${API_BASE}/GetCollectionOptions`, {
         ssoid,
         sport: 'Horse Racing',
         plan: 'Basic Plan',
@@ -88,7 +88,7 @@ export default function App() {
     setError('');
 
     try {
-      const response = await axios.post(`${API_BASE}/getAdvBasketDataSize`, {
+      const response = await axios.post(`${API_BASE}/GetAdvBasketDataSize`, {
         ssoid,
         sport: 'Horse Racing',
         plan: 'Basic Plan',
@@ -117,7 +117,7 @@ export default function App() {
     setError('');
 
     try {
-      const response = await axios.post(`${API_BASE}/downloadListOfFiles`, {
+      const response = await axios.post(`${API_BASE}/DownloadListOfFiles`, {
         ssoid,
         sport: 'Horse Racing',
         plan: 'Basic Plan',
