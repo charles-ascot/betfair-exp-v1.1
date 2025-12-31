@@ -203,20 +203,25 @@ async def download_list_of_files(filter_data: dict):
             "fileTypeCollection": filter_data.get("fileTypeCollection", [])
         }
         
-        logger.info(f"DownloadListOfFiles request")
-        
+        logger.info(f"DownloadListOfFiles request: {request_body}")
+
         response = await http_client.post(
             f"{HISTORIC_DATA_BASE}/DownloadListOfFiles",
             headers=headers,
             json=request_body
         )
-        
+
         logger.info(f"DownloadListOfFiles response: {response.status_code}")
-        
+        logger.info(f"DownloadListOfFiles response body (first 500 chars): {response.text[:500]}")
+
         if response.status_code != 200:
-            logger.error(f"DownloadListOfFiles returned {response.status_code}")
+            logger.error(f"DownloadListOfFiles returned {response.status_code}: {response.text[:500]}")
             raise HTTPException(status_code=response.status_code, detail=response.text[:200])
-        
+
+        # Handle case where response might be empty or not JSON
+        if not response.text or response.text.strip() == "":
+            return []
+
         return response.json()
     
     except HTTPException:
