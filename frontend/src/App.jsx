@@ -29,7 +29,6 @@ export default function App() {
   const [fileCount, setFileCount] = useState(0);
   const [totalSizeMB, setTotalSizeMB] = useState(0);
   const [hasChecked, setHasChecked] = useState(false);
-  const [downloadPath, setDownloadPath] = useState('');
 
   const handleConnect = async () => {
     if (!ssoid.trim()) {
@@ -88,28 +87,14 @@ export default function App() {
     }
   };
 
-  const handleSelectDownloadLocation = () => {
-    // This would open a file picker - for now, show a mock dialog
-    const path = window.prompt('Enter download location path:', downloadPath || '/downloads');
-    if (path) {
-      setDownloadPath(path);
-      setSuccess(`Download location set to: ${path}`);
-      setTimeout(() => setSuccess(''), 3000);
-    }
-  };
-
   const handleDownload = async () => {
-    if (!downloadPath) {
-      setError('Please select a download location first');
-      return;
-    }
-
     setLoading(true);
     setError('');
     setSuccess('');
 
     try {
-      const response = await axios.post(`${API_BASE}/api/downloadListOfFiles`, {
+      // First get the list of files
+      const listResponse = await axios.post(`${API_BASE}/api/downloadListOfFiles`, {
         ssoid,
         sport: 'Horse Racing',
         plan: 'Basic Plan',
@@ -124,11 +109,37 @@ export default function App() {
         fileTypeCollection: selectedFileTypes
       });
 
-      // Handle download (this is typically handled by backend)
-      setSuccess(`Download initiated: ${response.data.length || fileCount} files to ${downloadPath}`);
+      const filePaths = listResponse.data;
+      if (!filePaths || filePaths.length === 0) {
+        setError('No files found to download');
+        return;
+      }
+
+      setSuccess(`Downloading ${filePaths.length} files... This may take a moment.`);
+
+      // Now download the files as a ZIP
+      const downloadResponse = await axios.post(
+        `${API_BASE}/api/downloadFiles`,
+        { ssoid, filePaths },
+        { responseType: 'blob' }
+      );
+
+      // Create a download link and trigger it
+      const blob = new Blob([downloadResponse.data], { type: 'application/zip' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'betfair_historic_data.zip';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+
+      setSuccess(`Download complete: ${filePaths.length} files`);
       setTimeout(() => setSuccess(''), 4000);
     } catch (err) {
-      setError('Failed to initiate download. Please try again.');
+      console.error('Download error:', err);
+      setError('Failed to download files. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -333,25 +344,11 @@ export default function App() {
 
                 <div className="download-section">
                   <button
-                    className="button-location"
-                    onClick={handleSelectDownloadLocation}
-                  >
-                    📂 Download Location
-                  </button>
-                  
-                  {downloadPath && (
-                    <div className="path-display">
-                      <span className="path-label">Path:</span>
-                      <span className="path-value">{downloadPath}</span>
-                    </div>
-                  )}
-
-                  <button
                     className="button-download"
                     onClick={handleDownload}
-                    disabled={loading || !downloadPath}
+                    disabled={loading}
                   >
-                    {loading ? 'Downloading...' : '⬇️ Download'}
+                    {loading ? 'Downloading...' : '⬇️ Download Files'}
                   </button>
                 </div>
               </div>

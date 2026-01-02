@@ -1,8 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import httpx
 import logging
 import os
+import urllib.parse
+import asyncio
+import zipfile
+import io
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -245,4 +250,123 @@ async def download_list_of_files(filter_data: dict):
         raise
     except Exception as e:
         logger.error(f"DownloadListOfFiles error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/downloadFile")
+async def download_file(filePath: str, ssoid: str):
+    """Download a single file from Betfair Historic Data"""
+    try:
+        if not ssoid:
+            raise HTTPException(status_code=400, detail="Missing ssoid")
+        if not filePath:
+            raise HTTPException(status_code=400, detail="Missing filePath")
+
+        headers = {
+            "ssoid": ssoid,
+            "Content-Type": "application/json"
+        }
+
+        # URL encode the file path for the query parameter
+        encoded_path = urllib.parse.quote(filePath, safe='')
+        download_url = f"{HISTORIC_DATA_BASE}/DownloadFile?filePath={encoded_path}"
+
+        logger.info(f"DownloadFile request: {filePath}")
+
+        response = await http_client.get(download_url, headers=headers)
+
+        logger.info(f"DownloadFile response: {response.status_code}, size: {len(response.content)} bytes")
+
+        if response.status_code != 200:
+            logger.error(f"DownloadFile failed: {response.status_code}")
+            raise HTTPException(status_code=response.status_code, detail="Failed to download file from Betfair")
+
+        # Extract filename from path
+        filename = filePath.split('/')[-1]
+
+        return StreamingResponse(
+            io.BytesIO(response.content),
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Content-Length": str(len(response.content))
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"DownloadFile error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/downloadFiles")
+async def download_files(data: dict):
+    """Download multiple files and return as a ZIP archive"""
+    try:
+        ssoid = data.get("ssoid")
+        file_paths = data.get("filePaths", [])
+
+        if not ssoid:
+            raise HTTPException(status_code=400, detail="Missing ssoid")
+        if not file_paths:
+            raise HTTPException(status_code=400, detail="No files to download")
+
+        headers = {
+            "ssoid": ssoid,
+            "Content-Type": "application/json"
+        }
+
+        logger.info(f"DownloadFiles request: {len(file_paths)} files")
+
+        # Create an in-memory ZIP file
+        zip_buffer = io.BytesIO()
+
+        async def download_single_file(path):
+            encoded_path = urllib.parse.quote(path, safe='')
+            download_url = f"{HISTORIC_DATA_BASE}/DownloadFile?filePath={encoded_path}"
+            try:
+                response = await http_client.get(download_url, headers=headers)
+                if response.status_code == 200:
+                    filename = path.split('/')[-1]
+                    return (filename, response.content)
+                else:
+                    logger.warning(f"Failed to download {path}: {response.status_code}")
+                    return None
+            except Exception as e:
+                logger.warning(f"Error downloading {path}: {e}")
+                return None
+
+        # Download files concurrently (limit to 5 at a time to avoid overwhelming the API)
+        downloaded_files = []
+        batch_size = 5
+        for i in range(0, len(file_paths), batch_size):
+            batch = file_paths[i:i + batch_size]
+            results = await asyncio.gather(*[download_single_file(path) for path in batch])
+            downloaded_files.extend([r for r in results if r is not None])
+            logger.info(f"Downloaded batch {i//batch_size + 1}, total files: {len(downloaded_files)}")
+
+        if not downloaded_files:
+            raise HTTPException(status_code=500, detail="Failed to download any files")
+
+        # Create ZIP archive
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for filename, content in downloaded_files:
+                zip_file.writestr(filename, content)
+
+        zip_buffer.seek(0)
+
+        logger.info(f"DownloadFiles complete: {len(downloaded_files)} files in ZIP")
+
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": "attachment; filename=betfair_historic_data.zip",
+                "Content-Length": str(zip_buffer.getbuffer().nbytes)
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"DownloadFiles error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
