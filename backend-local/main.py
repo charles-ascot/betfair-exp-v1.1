@@ -304,11 +304,18 @@ async def download_files(data: dict):
     try:
         ssoid = data.get("ssoid")
         file_paths = data.get("filePaths", [])
+        # Limit files to prevent timeout (max 500 files per request)
+        max_files = data.get("maxFiles", 500)
 
         if not ssoid:
             raise HTTPException(status_code=400, detail="Missing ssoid")
         if not file_paths:
             raise HTTPException(status_code=400, detail="No files to download")
+
+        # Limit the number of files to prevent timeout
+        if len(file_paths) > max_files:
+            logger.warning(f"Limiting download from {len(file_paths)} to {max_files} files")
+            file_paths = file_paths[:max_files]
 
         headers = {
             "ssoid": ssoid,
@@ -320,29 +327,29 @@ async def download_files(data: dict):
         # Create an in-memory ZIP file
         zip_buffer = io.BytesIO()
 
-        async def download_single_file(path):
-            encoded_path = urllib.parse.quote(path, safe='')
-            download_url = f"{HISTORIC_DATA_BASE}/DownloadFile?filePath={encoded_path}"
-            try:
-                response = await http_client.get(download_url, headers=headers)
-                if response.status_code == 200:
-                    filename = path.split('/')[-1]
-                    return (filename, response.content)
-                else:
-                    logger.warning(f"Failed to download {path}: {response.status_code}")
+        async def download_single_file(path, semaphore):
+            async with semaphore:
+                encoded_path = urllib.parse.quote(path, safe='')
+                download_url = f"{HISTORIC_DATA_BASE}/DownloadFile?filePath={encoded_path}"
+                try:
+                    response = await http_client.get(download_url, headers=headers)
+                    if response.status_code == 200:
+                        filename = path.split('/')[-1]
+                        return (filename, response.content)
+                    else:
+                        logger.warning(f"Failed to download {path}: {response.status_code}")
+                        return None
+                except Exception as e:
+                    logger.warning(f"Error downloading {path}: {e}")
                     return None
-            except Exception as e:
-                logger.warning(f"Error downloading {path}: {e}")
-                return None
 
-        # Download files concurrently (limit to 5 at a time to avoid overwhelming the API)
-        downloaded_files = []
-        batch_size = 5
-        for i in range(0, len(file_paths), batch_size):
-            batch = file_paths[i:i + batch_size]
-            results = await asyncio.gather(*[download_single_file(path) for path in batch])
-            downloaded_files.extend([r for r in results if r is not None])
-            logger.info(f"Downloaded batch {i//batch_size + 1}, total files: {len(downloaded_files)}")
+        # Download files concurrently with semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(20)  # Increased concurrency
+        tasks = [download_single_file(path, semaphore) for path in file_paths]
+        results = await asyncio.gather(*tasks)
+        downloaded_files = [r for r in results if r is not None]
+
+        logger.info(f"Downloaded {len(downloaded_files)} of {len(file_paths)} files")
 
         if not downloaded_files:
             raise HTTPException(status_code=500, detail="Failed to download any files")
