@@ -143,7 +143,7 @@ export default function App() {
           muted
           playsInline
           className="intro-video"
-          src="/assets/videos/chimera-bg.mp4"
+          src="/assets/videos/chimera1-bg.mp4"
           onEnded={() => setIntroComplete(true)}
         />
       </div>
