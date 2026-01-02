@@ -24,19 +24,44 @@ app.add_middleware(
 
 HISTORIC_DATA_BASE = "https://historicdata.betfair.com/api"
 
-# Global HTTP client with cookie jar (persists session)
+# Global HTTP client - no shared cookies to avoid session conflicts
 http_client = None
 
 @app.on_event("startup")
 async def startup_event():
     global http_client
     http_client = httpx.AsyncClient(
-        timeout=120.0,
+        timeout=180.0,  # Increased timeout
         follow_redirects=True,
-        cookies=httpx.Cookies()
+        limits=httpx.Limits(max_keepalive_connections=5, max_connections=50)
     )
     logger.info("🎰 Betfair Historic Data Explorer Starting...")
     logger.info(f"Historic Data API Base: {HISTORIC_DATA_BASE}")
+
+async def make_request_with_retry(method, url, headers, json=None, max_retries=2):
+    """Make HTTP request with retry logic"""
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            if method == "GET":
+                response = await http_client.get(url, headers=headers)
+            else:
+                response = await http_client.post(url, headers=headers, json=json)
+
+            # If we get a valid response (even error), return it
+            if response.status_code != 502 and response.status_code != 503:
+                return response
+
+            logger.warning(f"Attempt {attempt + 1} failed with {response.status_code}, retrying...")
+            await asyncio.sleep(1 * (attempt + 1))  # Exponential backoff
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Attempt {attempt + 1} failed with error: {e}, retrying...")
+            await asyncio.sleep(1 * (attempt + 1))
+
+    if last_error:
+        raise last_error
+    return response
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -51,26 +76,38 @@ async def get_my_data(data: dict):
         ssoid = data.get("ssoid")
         if not ssoid:
             raise HTTPException(status_code=400, detail="Missing ssoid")
-        
+
         headers = {
             "ssoid": ssoid,
             "Content-Type": "application/json"
         }
-        
+
         logger.info(f"GetMyData - Authenticating with ssoid")
-        
-        response = await http_client.get(
+
+        response = await make_request_with_retry(
+            "GET",
             f"{HISTORIC_DATA_BASE}/GetMyData",
             headers=headers
         )
-        
+
         logger.info(f"GetMyData response: {response.status_code}")
-        
+
         if response.status_code != 200:
+            logger.error(f"GetMyData returned {response.status_code}: {response.text[:500]}")
             raise HTTPException(status_code=response.status_code, detail=response.text[:200])
-        
-        return response.json()
-    
+
+        # Check if response is HTML (session expired or invalid)
+        if '<html' in response.text.lower() or '<!doctype' in response.text.lower():
+            logger.error("GetMyData returned HTML - session likely expired or invalid")
+            raise HTTPException(status_code=401, detail="Invalid or expired ssoid. Please get a new session token.")
+
+        # Try to parse JSON with error handling
+        try:
+            return response.json()
+        except Exception as json_err:
+            logger.error(f"GetMyData JSON parse error: {json_err}, response: {response.text[:500]}")
+            raise HTTPException(status_code=502, detail="Invalid response from Betfair. Session may have expired.")
+
     except HTTPException:
         raise
     except Exception as e:
@@ -107,8 +144,9 @@ async def get_collection_options(filter_data: dict):
         }
         
         logger.info(f"GetCollectionOptions request")
-        
-        response = await http_client.post(
+
+        response = await make_request_with_retry(
+            "POST",
             f"{HISTORIC_DATA_BASE}/GetCollectionOptions",
             headers=headers,
             json=request_body
@@ -136,12 +174,12 @@ async def get_adv_basket_data_size(filter_data: dict):
         ssoid = filter_data.get("ssoid")
         if not ssoid:
             raise HTTPException(status_code=400, detail="Missing ssoid")
-        
+
         headers = {
             "ssoid": ssoid,
             "Content-Type": "application/json"
         }
-        
+
         request_body = {
             "sport": filter_data.get("sport", "Horse Racing"),
             "plan": filter_data.get("plan", "Basic Plan"),
@@ -157,22 +195,35 @@ async def get_adv_basket_data_size(filter_data: dict):
             "countriesCollection": filter_data.get("countriesCollection", []),
             "fileTypeCollection": filter_data.get("fileTypeCollection", [])
         }
-        
+
         logger.info(f"GetAdvBasketDataSize request")
-        
-        response = await http_client.post(
+
+        response = await make_request_with_retry(
+            "POST",
             f"{HISTORIC_DATA_BASE}/GetAdvBasketDataSize",
             headers=headers,
             json=request_body
         )
-        
+
         logger.info(f"GetAdvBasketDataSize response: {response.status_code}")
-        
+        logger.debug(f"GetAdvBasketDataSize response body: {response.text[:500]}")
+
         if response.status_code != 200:
+            logger.error(f"GetAdvBasketDataSize returned {response.status_code}: {response.text[:500]}")
             raise HTTPException(status_code=response.status_code, detail=response.text[:200])
-        
-        return response.json()
-    
+
+        # Check if response is HTML (session expired)
+        if '<html' in response.text.lower() or '<!doctype' in response.text.lower():
+            logger.error("GetAdvBasketDataSize returned HTML - session likely expired")
+            raise HTTPException(status_code=401, detail="Session expired. Please log in again with a new ssoid.")
+
+        # Try to parse JSON with error handling
+        try:
+            return response.json()
+        except Exception as json_err:
+            logger.error(f"GetAdvBasketDataSize JSON parse error: {json_err}, response: {response.text[:500]}")
+            raise HTTPException(status_code=502, detail="Invalid response from Betfair. Session may have expired.")
+
     except HTTPException:
         raise
     except Exception as e:
@@ -209,7 +260,8 @@ async def download_list_of_files(filter_data: dict):
         logger.info(f"DownloadListOfFiles request: {request_body}")
         logger.info(f"DownloadListOfFiles headers: ssoid={ssoid[:10]}...")
 
-        response = await http_client.post(
+        response = await make_request_with_retry(
+            "POST",
             f"{HISTORIC_DATA_BASE}/DownloadListOfFiles",
             headers=headers,
             json=request_body
