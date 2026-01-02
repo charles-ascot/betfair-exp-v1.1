@@ -8,6 +8,7 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
 const YEARS = Array.from({ length: 10 }, (_, i) => 2024 - i);
 
 export default function App() {
+  const [introComplete, setIntroComplete] = useState(false);
   const [ssoid, setSsoid] = useState('');
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -133,10 +134,26 @@ export default function App() {
     }
   };
 
+  // Show intro video first
+  if (!introComplete) {
+    return (
+      <div className="intro-screen">
+        <video
+          autoPlay
+          muted
+          playsInline
+          className="intro-video"
+          src="/assets/videos/chimera-bg.mp4"
+          onEnded={() => setIntroComplete(true)}
+        />
+      </div>
+    );
+  }
+
   if (!isLoggedIn) {
     return (
       <div className="app">
-        <video autoPlay muted loop className="video-bg" src="/assets/videos/chimera-bg.mp4"></video>
+        <div className="image-bg"></div>
         <div className="login-overlay"></div>
         
         <div className="login-screen">
@@ -180,7 +197,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <video autoPlay muted loop className="video-bg" src="/assets/videos/chimera-bg.mp4"></video>
+      <div className="image-bg"></div>
       <div className="login-overlay"></div>
 
       <div className="dashboard">
