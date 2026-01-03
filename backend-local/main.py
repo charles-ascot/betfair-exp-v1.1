@@ -386,8 +386,18 @@ async def download_files(data: dict):
                 try:
                     response = await http_client.get(download_url, headers=headers)
                     if response.status_code == 200:
+                        content = response.content
+                        # Check if response is HTML error page instead of actual file
+                        content_str = content[:500].decode('utf-8', errors='ignore').lower()
+                        if '<html' in content_str or '<!doctype' in content_str:
+                            logger.warning(f"File {path} returned HTML instead of data (session expired?)")
+                            return None
+                        # Check minimum file size (real bz2 files should be > 100 bytes)
+                        if len(content) < 100:
+                            logger.warning(f"File {path} too small ({len(content)} bytes), skipping")
+                            return None
                         filename = path.split('/')[-1]
-                        return (filename, response.content)
+                        return (filename, content)
                     else:
                         logger.warning(f"Failed to download {path}: {response.status_code}")
                         return None

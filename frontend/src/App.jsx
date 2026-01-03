@@ -115,14 +115,31 @@ export default function App() {
         return;
       }
 
-      setSuccess(`Downloading ${filePaths.length} files... This may take a moment.`);
+      // Warn if there are many files
+      const totalFiles = filePaths.length;
+      const downloadingFiles = Math.min(totalFiles, 500);
+      if (totalFiles > 500) {
+        setSuccess(`Downloading first ${downloadingFiles} of ${totalFiles} files... (limit 500 per batch)`);
+      } else {
+        setSuccess(`Downloading ${downloadingFiles} files... This may take a moment.`);
+      }
 
       // Now download the files as a ZIP
       const downloadResponse = await axios.post(
         `${API_BASE}/api/downloadFiles`,
         { ssoid, filePaths },
-        { responseType: 'blob' }
+        { responseType: 'blob', timeout: 600000 }  // 10 minute timeout
       );
+
+      // Check if response is actually a ZIP or an error
+      if (downloadResponse.data.size < 1000) {
+        // Tiny response - likely an error
+        const text = await downloadResponse.data.text();
+        if (text.includes('error') || text.includes('expired')) {
+          setError('Session expired. Please logout and login with a new ssoid.');
+          return;
+        }
+      }
 
       // Create a download link and trigger it
       const blob = new Blob([downloadResponse.data], { type: 'application/zip' });
@@ -135,11 +152,12 @@ export default function App() {
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
 
-      setSuccess(`Download complete: ${filePaths.length} files`);
-      setTimeout(() => setSuccess(''), 4000);
+      setSuccess(`Download complete! ${downloadingFiles} files (${(downloadResponse.data.size / 1024 / 1024).toFixed(1)} MB)`);
+      setTimeout(() => setSuccess(''), 6000);
     } catch (err) {
       console.error('Download error:', err);
-      setError('Failed to download files. Please try again.');
+      const errorMsg = err.response?.data?.detail || err.message || 'Unknown error';
+      setError(`Failed to download: ${errorMsg}. Try a smaller date range or refresh your session.`);
     } finally {
       setLoading(false);
     }
