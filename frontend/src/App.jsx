@@ -30,6 +30,9 @@ export default function App() {
   const [totalSizeMB, setTotalSizeMB] = useState(0);
   const [hasChecked, setHasChecked] = useState(false);
   const [downloadStats, setDownloadStats] = useState(null);
+  const [allFilePaths, setAllFilePaths] = useState([]);
+  const [downloadedSoFar, setDownloadedSoFar] = useState(0);
+  const [currentBatch, setCurrentBatch] = useState(0);
 
   // Clear results when date range changes
   const handleDateChange = (setter) => (e) => {
@@ -38,6 +41,9 @@ export default function App() {
     setFileCount(0);
     setTotalSizeMB(0);
     setDownloadStats(null);
+    setAllFilePaths([]);
+    setDownloadedSoFar(0);
+    setCurrentBatch(0);
   };
 
   const handleConnect = async () => {
@@ -97,52 +103,66 @@ export default function App() {
     }
   };
 
+  const BATCH_SIZE = 500;
+
   const handleDownload = async () => {
     setLoading(true);
     setError('');
     setSuccess('');
-    setDownloadStats(null);
 
     try {
-      // First get the list of files
-      setSuccess('Fetching file list from Betfair...');
-      const listResponse = await axios.post(`${API_BASE}/api/downloadListOfFiles`, {
-        ssoid,
-        sport: 'Horse Racing',
-        plan: 'Basic Plan',
-        fromDay: 1,
-        fromMonth: parseInt(fromMonth),
-        fromYear: parseInt(fromYear),
-        toDay: 31,
-        toMonth: parseInt(toMonth),
-        toYear: parseInt(toYear),
-        marketTypesCollection: selectedMarkets,
-        countriesCollection: selectedCountries,
-        fileTypeCollection: selectedFileTypes
-      });
+      let filePaths = allFilePaths;
 
-      const filePaths = listResponse.data;
-      if (!filePaths || filePaths.length === 0) {
-        setError('No files found to download');
+      // If we don't have file paths yet, fetch them
+      if (filePaths.length === 0) {
+        setSuccess('Fetching file list from Betfair...');
+        const listResponse = await axios.post(`${API_BASE}/api/downloadListOfFiles`, {
+          ssoid,
+          sport: 'Horse Racing',
+          plan: 'Basic Plan',
+          fromDay: 1,
+          fromMonth: parseInt(fromMonth),
+          fromYear: parseInt(fromYear),
+          toDay: 31,
+          toMonth: parseInt(toMonth),
+          toYear: parseInt(toYear),
+          marketTypesCollection: selectedMarkets,
+          countriesCollection: selectedCountries,
+          fileTypeCollection: selectedFileTypes
+        });
+
+        filePaths = listResponse.data;
+        if (!filePaths || filePaths.length === 0) {
+          setError('No files found to download');
+          setLoading(false);
+          return;
+        }
+        setAllFilePaths(filePaths);
+        setDownloadedSoFar(0);
+        setCurrentBatch(0);
+      }
+
+      // Calculate which batch we're on
+      const startIndex = downloadedSoFar;
+      const remainingFiles = filePaths.slice(startIndex);
+
+      if (remainingFiles.length === 0) {
+        setSuccess('All files have been downloaded!');
+        setLoading(false);
         return;
       }
 
-      // Calculate batch info
-      const totalFiles = filePaths.length;
-      const batchLimit = 500;
-      const downloadingFiles = Math.min(totalFiles, batchLimit);
+      const batchFiles = remainingFiles.slice(0, BATCH_SIZE);
+      const batchNumber = currentBatch + 1;
+      const totalBatches = Math.ceil(filePaths.length / BATCH_SIZE);
 
-      if (totalFiles > batchLimit) {
-        setSuccess(`Downloading batch 1: ${downloadingFiles} of ${totalFiles} files...`);
-      } else {
-        setSuccess(`Downloading ${downloadingFiles} files...`);
-      }
+      setSuccess(`Downloading batch ${batchNumber}/${totalBatches}: ${batchFiles.length} files...`);
 
-      // Now download the files as a ZIP
+      // Download this batch
       const downloadResponse = await axios.post(
         `${API_BASE}/api/downloadFiles`,
-        { ssoid, filePaths },
-        { responseType: 'blob', timeout: 600000 }  // 10 minute timeout
+        { ssoid, filePaths: batchFiles },
+        { responseType: 'blob', timeout: 600000 }
       );
 
       // Check if response is actually a ZIP or an error
@@ -150,9 +170,15 @@ export default function App() {
         const text = await downloadResponse.data.text();
         if (text.includes('error') || text.includes('expired') || text.includes('Failed')) {
           setError('Session expired or download failed. Please logout and login with a new ssoid.');
+          setLoading(false);
           return;
         }
       }
+
+      // Get actual download stats from response headers
+      const filesRequested = parseInt(downloadResponse.headers['x-files-requested'] || batchFiles.length);
+      const filesDownloaded = parseInt(downloadResponse.headers['x-files-downloaded'] || 0);
+      const filesFailed = parseInt(downloadResponse.headers['x-files-failed'] || 0);
 
       // Create a download link and trigger it
       const blob = new Blob([downloadResponse.data], { type: 'application/zip' });
@@ -160,27 +186,42 @@ export default function App() {
       const link = document.createElement('a');
       link.href = url;
 
-      // Create descriptive filename
+      // Create descriptive filename with batch number
       const dateRange = `${MONTHS[parseInt(fromMonth)-1]}_${fromYear}_to_${MONTHS[parseInt(toMonth)-1]}_${toYear}`;
-      link.download = `betfair_historic_${dateRange}.zip`;
+      const batchSuffix = totalBatches > 1 ? `_batch${batchNumber}` : '';
+      link.download = `betfair_historic_${dateRange}${batchSuffix}.zip`;
 
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
 
+      // Update progress tracking
+      const newDownloadedSoFar = downloadedSoFar + filesDownloaded;
+      setDownloadedSoFar(newDownloadedSoFar);
+      setCurrentBatch(batchNumber);
+
       // Calculate and show stats
       const downloadedMB = (downloadResponse.data.size / 1024 / 1024).toFixed(2);
       const stats = {
-        requested: downloadingFiles,
-        totalAvailable: totalFiles,
+        batchNumber,
+        totalBatches,
+        filesRequested,
+        filesDownloaded,
+        filesFailed,
+        totalDownloaded: newDownloadedSoFar,
+        totalAvailable: filePaths.length,
+        remainingFiles: filePaths.length - newDownloadedSoFar,
         sizeMB: downloadedMB,
         dateRange: `${MONTHS[parseInt(fromMonth)-1]} ${fromYear} - ${MONTHS[parseInt(toMonth)-1]} ${toYear}`
       };
       setDownloadStats(stats);
 
-      setSuccess(`Download complete! ${downloadedMB} MB`);
-      setTimeout(() => setSuccess(''), 8000);
+      if (newDownloadedSoFar < filePaths.length) {
+        setSuccess(`Batch ${batchNumber} complete! ${filesDownloaded} files downloaded. Click again for next batch.`);
+      } else {
+        setSuccess(`All downloads complete! ${newDownloadedSoFar} files total.`);
+      }
     } catch (err) {
       console.error('Download error:', err);
       const errorMsg = err.response?.data?.detail || err.message || 'Unknown error';
@@ -403,23 +444,41 @@ export default function App() {
                     onClick={handleDownload}
                     disabled={loading}
                   >
-                    {loading ? 'Downloading...' : '⬇️ Download Files'}
+                    {loading ? 'Downloading...' :
+                      downloadStats && downloadStats.remainingFiles > 0
+                        ? `⬇️ Download Next Batch (${Math.min(BATCH_SIZE, downloadStats.remainingFiles)} files)`
+                        : downloadStats && downloadStats.remainingFiles === 0
+                          ? '✓ All Downloaded'
+                          : '⬇️ Download Files'
+                    }
                   </button>
                 </div>
 
                 {downloadStats && (
                   <div className="download-stats">
-                    <h3>Last Download</h3>
+                    <h3>Download Progress</h3>
                     <div className="stats-row">
                       <span>Date Range:</span>
                       <span>{downloadStats.dateRange}</span>
                     </div>
                     <div className="stats-row">
-                      <span>Files Requested:</span>
-                      <span>{downloadStats.requested} of {downloadStats.totalAvailable}</span>
+                      <span>Batch:</span>
+                      <span>{downloadStats.batchNumber} of {downloadStats.totalBatches}</span>
                     </div>
                     <div className="stats-row">
-                      <span>Downloaded Size:</span>
+                      <span>This Batch:</span>
+                      <span>{downloadStats.filesDownloaded} downloaded, {downloadStats.filesFailed} failed</span>
+                    </div>
+                    <div className="stats-row">
+                      <span>Total Progress:</span>
+                      <span>{downloadStats.totalDownloaded} of {downloadStats.totalAvailable} files</span>
+                    </div>
+                    <div className="stats-row">
+                      <span>Remaining:</span>
+                      <span>{downloadStats.remainingFiles} files</span>
+                    </div>
+                    <div className="stats-row">
+                      <span>Last Batch Size:</span>
                       <span>{downloadStats.sizeMB} MB</span>
                     </div>
                   </div>

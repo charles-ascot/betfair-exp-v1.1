@@ -20,6 +20,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Files-Requested", "X-Files-Downloaded", "X-Files-Failed"],
 )
 
 HISTORIC_DATA_BASE = "https://historicdata.betfair.com/api"
@@ -430,7 +431,10 @@ async def download_files(data: dict):
             media_type="application/zip",
             headers={
                 "Content-Disposition": "attachment; filename=betfair_historic_data.zip",
-                "Content-Length": str(zip_buffer.getbuffer().nbytes)
+                "Content-Length": str(zip_buffer.getbuffer().nbytes),
+                "X-Files-Requested": str(len(file_paths)),
+                "X-Files-Downloaded": str(len(downloaded_files)),
+                "X-Files-Failed": str(len(file_paths) - len(downloaded_files))
             }
         )
 
