@@ -611,6 +611,54 @@ body {
   gap: 12px;
 }
 
+.batch-warning {
+  background: rgba(255, 193, 7, 0.1);
+  border: 1px solid rgba(255, 193, 7, 0.3);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: #ffc107;
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+.download-stats {
+  background: rgba(0, 212, 255, 0.05);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+  border-radius: 10px;
+  padding: 16px;
+  margin-top: 16px;
+}
+
+.download-stats h3 {
+  margin: 0 0 12px 0;
+  font-size: 13px;
+  color: #00D4FF;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.stats-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.stats-row:last-child {
+  border-bottom: none;
+}
+
+.stats-row span:first-child {
+  color: #888;
+}
+
+.stats-row span:last-child {
+  color: #fff;
+  font-weight: 500;
+}
+
 .path-display {
   background: rgba(20, 30, 50, 0.5);
   border: 1px solid rgba(0, 212, 255, 0.2);

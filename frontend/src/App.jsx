@@ -29,6 +29,16 @@ export default function App() {
   const [fileCount, setFileCount] = useState(0);
   const [totalSizeMB, setTotalSizeMB] = useState(0);
   const [hasChecked, setHasChecked] = useState(false);
+  const [downloadStats, setDownloadStats] = useState(null);
+
+  // Clear results when date range changes
+  const handleDateChange = (setter) => (e) => {
+    setter(e.target.value);
+    setHasChecked(false);
+    setFileCount(0);
+    setTotalSizeMB(0);
+    setDownloadStats(null);
+  };
 
   const handleConnect = async () => {
     if (!ssoid.trim()) {
@@ -91,9 +101,11 @@ export default function App() {
     setLoading(true);
     setError('');
     setSuccess('');
+    setDownloadStats(null);
 
     try {
       // First get the list of files
+      setSuccess('Fetching file list from Betfair...');
       const listResponse = await axios.post(`${API_BASE}/api/downloadListOfFiles`, {
         ssoid,
         sport: 'Horse Racing',
@@ -115,13 +127,15 @@ export default function App() {
         return;
       }
 
-      // Warn if there are many files
+      // Calculate batch info
       const totalFiles = filePaths.length;
-      const downloadingFiles = Math.min(totalFiles, 500);
-      if (totalFiles > 500) {
-        setSuccess(`Downloading first ${downloadingFiles} of ${totalFiles} files... (limit 500 per batch)`);
+      const batchLimit = 500;
+      const downloadingFiles = Math.min(totalFiles, batchLimit);
+
+      if (totalFiles > batchLimit) {
+        setSuccess(`Downloading batch 1: ${downloadingFiles} of ${totalFiles} files...`);
       } else {
-        setSuccess(`Downloading ${downloadingFiles} files... This may take a moment.`);
+        setSuccess(`Downloading ${downloadingFiles} files...`);
       }
 
       // Now download the files as a ZIP
@@ -133,10 +147,9 @@ export default function App() {
 
       // Check if response is actually a ZIP or an error
       if (downloadResponse.data.size < 1000) {
-        // Tiny response - likely an error
         const text = await downloadResponse.data.text();
-        if (text.includes('error') || text.includes('expired')) {
-          setError('Session expired. Please logout and login with a new ssoid.');
+        if (text.includes('error') || text.includes('expired') || text.includes('Failed')) {
+          setError('Session expired or download failed. Please logout and login with a new ssoid.');
           return;
         }
       }
@@ -146,18 +159,36 @@ export default function App() {
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = 'betfair_historic_data.zip';
+
+      // Create descriptive filename
+      const dateRange = `${MONTHS[parseInt(fromMonth)-1]}_${fromYear}_to_${MONTHS[parseInt(toMonth)-1]}_${toYear}`;
+      link.download = `betfair_historic_${dateRange}.zip`;
+
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
 
-      setSuccess(`Download complete! ${downloadingFiles} files (${(downloadResponse.data.size / 1024 / 1024).toFixed(1)} MB)`);
-      setTimeout(() => setSuccess(''), 6000);
+      // Calculate and show stats
+      const downloadedMB = (downloadResponse.data.size / 1024 / 1024).toFixed(2);
+      const stats = {
+        requested: downloadingFiles,
+        totalAvailable: totalFiles,
+        sizeMB: downloadedMB,
+        dateRange: `${MONTHS[parseInt(fromMonth)-1]} ${fromYear} - ${MONTHS[parseInt(toMonth)-1]} ${toYear}`
+      };
+      setDownloadStats(stats);
+
+      setSuccess(`Download complete! ${downloadedMB} MB`);
+      setTimeout(() => setSuccess(''), 8000);
     } catch (err) {
       console.error('Download error:', err);
       const errorMsg = err.response?.data?.detail || err.message || 'Unknown error';
-      setError(`Failed to download: ${errorMsg}. Try a smaller date range or refresh your session.`);
+      if (errorMsg.includes('401') || errorMsg.includes('expired') || errorMsg.includes('ssoid')) {
+        setError('Session expired. Please logout and login with a fresh ssoid.');
+      } else {
+        setError(`Download failed: ${errorMsg}`);
+      }
     } finally {
       setLoading(false);
     }
@@ -264,7 +295,7 @@ export default function App() {
                     <select
                       className="date-select"
                       value={fromMonth}
-                      onChange={(e) => setFromMonth(e.target.value)}
+                      onChange={handleDateChange(setFromMonth)}
                     >
                       {MONTHS.map((m, i) => (
                         <option key={i} value={i + 1}>
@@ -275,7 +306,7 @@ export default function App() {
                     <select
                       className="date-select"
                       value={fromYear}
-                      onChange={(e) => setFromYear(e.target.value)}
+                      onChange={handleDateChange(setFromYear)}
                     >
                       {YEARS.map((y) => (
                         <option key={y} value={y}>
@@ -292,7 +323,7 @@ export default function App() {
                     <select
                       className="date-select"
                       value={toMonth}
-                      onChange={(e) => setToMonth(e.target.value)}
+                      onChange={handleDateChange(setToMonth)}
                     >
                       {MONTHS.map((m, i) => (
                         <option key={i} value={i + 1}>
@@ -303,7 +334,7 @@ export default function App() {
                     <select
                       className="date-select"
                       value={toYear}
-                      onChange={(e) => setToYear(e.target.value)}
+                      onChange={handleDateChange(setToYear)}
                     >
                       {YEARS.map((y) => (
                         <option key={y} value={y}>
@@ -346,19 +377,25 @@ export default function App() {
             {hasChecked && (
               <div className="glass-panel results-panel">
                 <h2 className="panel-title">Results</h2>
-                
+
                 <div className="results-grid">
                   <div className="result-card">
                     <div className="result-icon">📁</div>
                     <div className="result-value">{fileCount.toLocaleString()}</div>
-                    <div className="result-label">Files</div>
+                    <div className="result-label">Files Available</div>
                   </div>
                   <div className="result-card">
                     <div className="result-icon">💾</div>
                     <div className="result-value">{totalSizeMB.toLocaleString()}</div>
-                    <div className="result-label">MB</div>
+                    <div className="result-label">MB Total</div>
                   </div>
                 </div>
+
+                {fileCount > 500 && (
+                  <div className="batch-warning">
+                    ⚠️ Large dataset: Will download first 500 files per batch
+                  </div>
+                )}
 
                 <div className="download-section">
                   <button
@@ -369,6 +406,24 @@ export default function App() {
                     {loading ? 'Downloading...' : '⬇️ Download Files'}
                   </button>
                 </div>
+
+                {downloadStats && (
+                  <div className="download-stats">
+                    <h3>Last Download</h3>
+                    <div className="stats-row">
+                      <span>Date Range:</span>
+                      <span>{downloadStats.dateRange}</span>
+                    </div>
+                    <div className="stats-row">
+                      <span>Files Requested:</span>
+                      <span>{downloadStats.requested} of {downloadStats.totalAvailable}</span>
+                    </div>
+                    <div className="stats-row">
+                      <span>Downloaded Size:</span>
+                      <span>{downloadStats.sizeMB} MB</span>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
