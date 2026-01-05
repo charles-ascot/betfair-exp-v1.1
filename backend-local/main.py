@@ -513,8 +513,28 @@ async def download_files_to_gcs(data: dict):
             async with semaphore:
                 encoded_path = urllib.parse.quote(path, safe='')
                 download_url = f"{HISTORIC_DATA_BASE}/DownloadFile?filePath={encoded_path}"
+
+                # Retry logic for rate limiting (429)
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        response = await http_client.get(download_url, headers=headers)
+
+                        # Handle rate limiting with exponential backoff
+                        if response.status_code == 429:
+                            wait_time = (attempt + 1) * 2  # 2, 4, 6 seconds
+                            logger.warning(f"Rate limited on {path}, waiting {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                            await asyncio.sleep(wait_time)
+                            continue
+
+                        break  # Success or non-retryable error
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep((attempt + 1) * 2)
+                            continue
+                        raise
+
                 try:
-                    response = await http_client.get(download_url, headers=headers)
                     if response.status_code == 200:
                         content = response.content
                         # Check if response is HTML error page instead of actual file
@@ -553,7 +573,8 @@ async def download_files_to_gcs(data: dict):
                     return {"path": path, "success": False, "error": str(e)}
 
         # Download and upload files concurrently with semaphore to limit concurrent requests
-        semaphore = asyncio.Semaphore(20)
+        # Reduced to 5 to avoid Betfair rate limiting (429 errors)
+        semaphore = asyncio.Semaphore(5)
         tasks = [download_and_upload_file(path, semaphore) for path in file_paths]
         results = await asyncio.gather(*tasks)
 
