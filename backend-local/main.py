@@ -516,6 +516,9 @@ async def download_files_to_gcs(data: dict):
 
                 # Retry logic for rate limiting (429)
                 max_retries = 3
+                response = None
+                last_error = None
+
                 for attempt in range(max_retries):
                     try:
                         response = await http_client.get(download_url, headers=headers)
@@ -529,10 +532,18 @@ async def download_files_to_gcs(data: dict):
 
                         break  # Success or non-retryable error
                     except Exception as e:
+                        last_error = e
                         if attempt < max_retries - 1:
                             await asyncio.sleep((attempt + 1) * 2)
                             continue
-                        raise
+                        # All retries exhausted
+                        logger.error(f"All retries failed for {path}: {type(e).__name__}: {e}")
+                        return {"path": path, "success": False, "error": f"Connection failed: {str(e)}"}
+
+                # Check if we have a valid response
+                if response is None:
+                    logger.error(f"No response received for {path}")
+                    return {"path": path, "success": False, "error": "No response received"}
 
                 try:
                     if response.status_code == 200:
@@ -548,33 +559,39 @@ async def download_files_to_gcs(data: dict):
                             return {"path": path, "success": False, "error": "File too small"}
 
                         # Extract filename and create GCS path
-                        # Original path format: /betfair/Horse Racing/Basic Plan/2024/Jan/2/12345678/1.123456789.bz2
-                        # We'll store with a structured path in GCS
+                        # Original path format: /xds_nfs/hdfs_supreme/BASIC/2016/Jan/...
+                        # We'll store with a cleaner structure in GCS
                         filename = path.split('/')[-1]
                         # Create folder structure from the original path
-                        # Remove leading slash and 'betfair' prefix for cleaner structure
+                        # Remove leading slash and simplify path
                         gcs_path = path.lstrip('/')
-                        if gcs_path.startswith('betfair/'):
-                            gcs_path = gcs_path[8:]  # Remove 'betfair/' prefix
+                        # Remove xds_nfs/hdfs_supreme prefix if present
+                        if gcs_path.startswith('xds_nfs/hdfs_supreme/'):
+                            gcs_path = gcs_path[21:]  # Remove 'xds_nfs/hdfs_supreme/' prefix
 
                         # Upload to GCS in thread pool (since GCS client is blocking)
-                        loop = asyncio.get_event_loop()
-                        await loop.run_in_executor(
-                            thread_executor,
-                            functools.partial(upload_to_gcs_sync, bucket, gcs_path, content)
-                        )
+                        try:
+                            loop = asyncio.get_event_loop()
+                            await loop.run_in_executor(
+                                thread_executor,
+                                functools.partial(upload_to_gcs_sync, bucket, gcs_path, content)
+                            )
+                            logger.info(f"Uploaded {gcs_path} ({len(content)} bytes)")
+                        except Exception as gcs_err:
+                            logger.error(f"GCS upload failed for {path}: {gcs_err}")
+                            return {"path": path, "success": False, "error": f"GCS upload failed: {str(gcs_err)}"}
 
                         return {"path": path, "success": True, "gcs_path": f"gs://{GCS_BUCKET_NAME}/{gcs_path}"}
                     else:
                         logger.warning(f"Failed to download {path}: {response.status_code}")
                         return {"path": path, "success": False, "error": f"HTTP {response.status_code}"}
                 except Exception as e:
-                    logger.warning(f"Error downloading/uploading {path}: {e}")
+                    logger.error(f"Error downloading/uploading {path}: {type(e).__name__}: {e}")
                     return {"path": path, "success": False, "error": str(e)}
 
         # Download and upload files concurrently with semaphore to limit concurrent requests
-        # Reduced to 5 to avoid Betfair rate limiting (429 errors)
-        semaphore = asyncio.Semaphore(5)
+        # Set to 10 for reasonable speed while avoiding rate limiting
+        semaphore = asyncio.Semaphore(10)
         tasks = [download_and_upload_file(path, semaphore) for path in file_paths]
         results = await asyncio.gather(*tasks)
 
