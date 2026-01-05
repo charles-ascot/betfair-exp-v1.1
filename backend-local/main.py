@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 import logging
 import os
@@ -8,6 +8,9 @@ import urllib.parse
 import asyncio
 import zipfile
 import io
+from google.cloud import storage
+from concurrent.futures import ThreadPoolExecutor
+import functools
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,18 +28,36 @@ app.add_middleware(
 
 HISTORIC_DATA_BASE = "https://historicdata.betfair.com/api"
 
+# GCS Configuration
+GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "betfair-basic-historic")
+GCS_PROJECT_ID = os.getenv("GCS_PROJECT_ID", "betfair-data-explorer")
+
 # Global HTTP client - no shared cookies to avoid session conflicts
 http_client = None
+gcs_client = None
+thread_executor = None
 
 @app.on_event("startup")
 async def startup_event():
-    global http_client
+    global http_client, gcs_client, thread_executor
     http_client = httpx.AsyncClient(
         timeout=180.0,  # Increased timeout
         follow_redirects=True,
         limits=httpx.Limits(max_keepalive_connections=5, max_connections=50)
     )
-    logger.info("🎰 Betfair Historic Data Explorer Starting...")
+    # Initialize GCS client
+    try:
+        gcs_client = storage.Client(project=GCS_PROJECT_ID)
+        logger.info(f"GCS client initialized for project: {GCS_PROJECT_ID}")
+        logger.info(f"GCS bucket: {GCS_BUCKET_NAME}")
+    except Exception as e:
+        logger.warning(f"GCS client initialization failed: {e}. GCS uploads will not work.")
+        gcs_client = None
+
+    # Thread executor for blocking GCS operations
+    thread_executor = ThreadPoolExecutor(max_workers=20)
+
+    logger.info("Betfair Historic Data Explorer Starting...")
     logger.info(f"Historic Data API Base: {HISTORIC_DATA_BASE}")
 
 async def make_request_with_retry(method, url, headers, json=None, max_retries=2):
@@ -66,9 +87,11 @@ async def make_request_with_retry(method, url, headers, json=None, max_retries=2
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global http_client
+    global http_client, thread_executor
     if http_client:
         await http_client.aclose()
+    if thread_executor:
+        thread_executor.shutdown(wait=False)
 
 @app.post("/api/GetMyData")
 async def get_my_data(data: dict):
@@ -443,3 +466,176 @@ async def download_files(data: dict):
     except Exception as e:
         logger.error(f"DownloadFiles error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def upload_to_gcs_sync(bucket, blob_path, content):
+    """Synchronous GCS upload function to run in thread pool"""
+    blob = bucket.blob(blob_path)
+    blob.upload_from_string(content)
+    return blob_path
+
+
+@app.post("/api/downloadFilesToGCS")
+async def download_files_to_gcs(data: dict):
+    """Download files from Betfair and upload them to Google Cloud Storage"""
+    try:
+        if gcs_client is None:
+            raise HTTPException(status_code=503, detail="GCS client not initialized")
+
+        ssoid = data.get("ssoid")
+        file_paths = data.get("filePaths", [])
+        max_files = data.get("maxFiles", 500)
+
+        if not ssoid:
+            raise HTTPException(status_code=400, detail="Missing ssoid")
+        if not file_paths:
+            raise HTTPException(status_code=400, detail="No files to download")
+
+        # Limit the number of files to prevent timeout
+        if len(file_paths) > max_files:
+            logger.warning(f"Limiting download from {len(file_paths)} to {max_files} files")
+            file_paths = file_paths[:max_files]
+
+        headers = {
+            "ssoid": ssoid,
+            "Content-Type": "application/json"
+        }
+
+        logger.info(f"DownloadFilesToGCS request: {len(file_paths)} files")
+
+        # Get the GCS bucket
+        bucket = gcs_client.bucket(GCS_BUCKET_NAME)
+
+        uploaded_files = []
+        failed_files = []
+
+        async def download_and_upload_file(path, semaphore):
+            async with semaphore:
+                encoded_path = urllib.parse.quote(path, safe='')
+                download_url = f"{HISTORIC_DATA_BASE}/DownloadFile?filePath={encoded_path}"
+                try:
+                    response = await http_client.get(download_url, headers=headers)
+                    if response.status_code == 200:
+                        content = response.content
+                        # Check if response is HTML error page instead of actual file
+                        content_str = content[:500].decode('utf-8', errors='ignore').lower()
+                        if '<html' in content_str or '<!doctype' in content_str:
+                            logger.warning(f"File {path} returned HTML instead of data (session expired?)")
+                            return {"path": path, "success": False, "error": "Session expired"}
+                        # Check minimum file size (real bz2 files should be > 100 bytes)
+                        if len(content) < 100:
+                            logger.warning(f"File {path} too small ({len(content)} bytes), skipping")
+                            return {"path": path, "success": False, "error": "File too small"}
+
+                        # Extract filename and create GCS path
+                        # Original path format: /betfair/Horse Racing/Basic Plan/2024/Jan/2/12345678/1.123456789.bz2
+                        # We'll store with a structured path in GCS
+                        filename = path.split('/')[-1]
+                        # Create folder structure from the original path
+                        # Remove leading slash and 'betfair' prefix for cleaner structure
+                        gcs_path = path.lstrip('/')
+                        if gcs_path.startswith('betfair/'):
+                            gcs_path = gcs_path[8:]  # Remove 'betfair/' prefix
+
+                        # Upload to GCS in thread pool (since GCS client is blocking)
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(
+                            thread_executor,
+                            functools.partial(upload_to_gcs_sync, bucket, gcs_path, content)
+                        )
+
+                        return {"path": path, "success": True, "gcs_path": f"gs://{GCS_BUCKET_NAME}/{gcs_path}"}
+                    else:
+                        logger.warning(f"Failed to download {path}: {response.status_code}")
+                        return {"path": path, "success": False, "error": f"HTTP {response.status_code}"}
+                except Exception as e:
+                    logger.warning(f"Error downloading/uploading {path}: {e}")
+                    return {"path": path, "success": False, "error": str(e)}
+
+        # Download and upload files concurrently with semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(20)
+        tasks = [download_and_upload_file(path, semaphore) for path in file_paths]
+        results = await asyncio.gather(*tasks)
+
+        for result in results:
+            if result["success"]:
+                uploaded_files.append(result)
+            else:
+                failed_files.append(result)
+
+        logger.info(f"DownloadFilesToGCS complete: {len(uploaded_files)} uploaded, {len(failed_files)} failed")
+
+        return JSONResponse(
+            content={
+                "success": True,
+                "bucket": GCS_BUCKET_NAME,
+                "filesRequested": len(file_paths),
+                "filesUploaded": len(uploaded_files),
+                "filesFailed": len(failed_files),
+                "uploadedFiles": uploaded_files[:10],  # Return first 10 as sample
+                "failedFiles": failed_files[:10]  # Return first 10 failed as sample
+            },
+            headers={
+                "X-Files-Requested": str(len(file_paths)),
+                "X-Files-Downloaded": str(len(uploaded_files)),
+                "X-Files-Failed": str(len(failed_files))
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"DownloadFilesToGCS error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gcsStatus")
+async def gcs_status():
+    """Check GCS connection status and bucket info"""
+    try:
+        if gcs_client is None:
+            return JSONResponse(
+                content={
+                    "connected": False,
+                    "error": "GCS client not initialized"
+                },
+                status_code=503
+            )
+
+        bucket = gcs_client.bucket(GCS_BUCKET_NAME)
+        exists = bucket.exists()
+
+        if exists:
+            # Count objects in bucket (limit to first 1000 for speed)
+            blobs = list(bucket.list_blobs(max_results=1000))
+            return JSONResponse(
+                content={
+                    "connected": True,
+                    "bucket": GCS_BUCKET_NAME,
+                    "project": GCS_PROJECT_ID,
+                    "bucketExists": True,
+                    "objectCount": len(blobs),
+                    "objectCountLimited": len(blobs) >= 1000
+                }
+            )
+        else:
+            return JSONResponse(
+                content={
+                    "connected": True,
+                    "bucket": GCS_BUCKET_NAME,
+                    "project": GCS_PROJECT_ID,
+                    "bucketExists": False,
+                    "error": f"Bucket {GCS_BUCKET_NAME} does not exist"
+                },
+                status_code=404
+            )
+
+    except Exception as e:
+        logger.error(f"GCS status check error: {str(e)}", exc_info=True)
+        return JSONResponse(
+            content={
+                "connected": False,
+                "error": str(e)
+            },
+            status_code=500
+        )

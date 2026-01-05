@@ -156,45 +156,28 @@ export default function App() {
       const batchNumber = currentBatch + 1;
       const totalBatches = Math.ceil(filePaths.length / BATCH_SIZE);
 
-      setSuccess(`Downloading batch ${batchNumber}/${totalBatches}: ${batchFiles.length} files...`);
+      setSuccess(`Uploading batch ${batchNumber}/${totalBatches} to Cloud Storage: ${batchFiles.length} files...`);
 
-      // Download this batch
-      const downloadResponse = await axios.post(
-        `${API_BASE}/api/downloadFiles`,
+      // Upload this batch to GCS
+      const uploadResponse = await axios.post(
+        `${API_BASE}/api/downloadFilesToGCS`,
         { ssoid, filePaths: batchFiles },
-        { responseType: 'blob', timeout: 600000 }
+        { timeout: 600000 }
       );
 
-      // Check if response is actually a ZIP or an error
-      if (downloadResponse.data.size < 1000) {
-        const text = await downloadResponse.data.text();
-        if (text.includes('error') || text.includes('expired') || text.includes('Failed')) {
-          setError('Session expired or download failed. Please logout and login with a new ssoid.');
-          setLoading(false);
-          return;
-        }
+      const data = uploadResponse.data;
+
+      // Check for errors
+      if (!data.success) {
+        setError('Upload failed. Please logout and login with a new ssoid.');
+        setLoading(false);
+        return;
       }
 
-      // Get actual download stats from response headers
-      const filesRequested = parseInt(downloadResponse.headers['x-files-requested'] || batchFiles.length);
-      const filesDownloaded = parseInt(downloadResponse.headers['x-files-downloaded'] || 0);
-      const filesFailed = parseInt(downloadResponse.headers['x-files-failed'] || 0);
-
-      // Create a download link and trigger it
-      const blob = new Blob([downloadResponse.data], { type: 'application/zip' });
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-
-      // Create descriptive filename with batch number
-      const dateRange = `${MONTHS[parseInt(fromMonth)-1]}_${fromYear}_to_${MONTHS[parseInt(toMonth)-1]}_${toYear}`;
-      const batchSuffix = totalBatches > 1 ? `_batch${batchNumber}` : '';
-      link.download = `betfair_historic_${dateRange}${batchSuffix}.zip`;
-
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
+      // Get actual upload stats from response
+      const filesRequested = data.filesRequested || batchFiles.length;
+      const filesDownloaded = data.filesUploaded || 0;
+      const filesFailed = data.filesFailed || 0;
 
       // Update progress tracking
       const newDownloadedSoFar = downloadedSoFar + filesDownloaded;
@@ -202,7 +185,6 @@ export default function App() {
       setCurrentBatch(batchNumber);
 
       // Calculate and show stats
-      const downloadedMB = (downloadResponse.data.size / 1024 / 1024).toFixed(2);
       const stats = {
         batchNumber,
         totalBatches,
@@ -212,15 +194,15 @@ export default function App() {
         totalDownloaded: newDownloadedSoFar,
         totalAvailable: filePaths.length,
         remainingFiles: filePaths.length - newDownloadedSoFar,
-        sizeMB: downloadedMB,
+        bucket: data.bucket,
         dateRange: `${MONTHS[parseInt(fromMonth)-1]} ${fromYear} - ${MONTHS[parseInt(toMonth)-1]} ${toYear}`
       };
       setDownloadStats(stats);
 
       if (newDownloadedSoFar < filePaths.length) {
-        setSuccess(`Batch ${batchNumber} complete! ${filesDownloaded} files downloaded. Click again for next batch.`);
+        setSuccess(`Batch ${batchNumber} complete! ${filesDownloaded} files uploaded to gs://${data.bucket}/. Click again for next batch.`);
       } else {
-        setSuccess(`All downloads complete! ${newDownloadedSoFar} files total.`);
+        setSuccess(`All uploads complete! ${newDownloadedSoFar} files saved to gs://${data.bucket}/`);
       }
     } catch (err) {
       console.error('Download error:', err);
@@ -444,19 +426,23 @@ export default function App() {
                     onClick={handleDownload}
                     disabled={loading}
                   >
-                    {loading ? 'Downloading...' :
+                    {loading ? 'Uploading to Cloud...' :
                       downloadStats && downloadStats.remainingFiles > 0
-                        ? `⬇️ Download Next Batch (${Math.min(BATCH_SIZE, downloadStats.remainingFiles)} files)`
+                        ? `☁️ Upload Next Batch (${Math.min(BATCH_SIZE, downloadStats.remainingFiles)} files)`
                         : downloadStats && downloadStats.remainingFiles === 0
-                          ? '✓ All Downloaded'
-                          : '⬇️ Download Files'
+                          ? '✓ All Uploaded'
+                          : '☁️ Upload to Cloud Storage'
                     }
                   </button>
                 </div>
 
                 {downloadStats && (
                   <div className="download-stats">
-                    <h3>Download Progress</h3>
+                    <h3>Upload Progress</h3>
+                    <div className="stats-row">
+                      <span>Destination:</span>
+                      <span>gs://{downloadStats.bucket}/</span>
+                    </div>
                     <div className="stats-row">
                       <span>Date Range:</span>
                       <span>{downloadStats.dateRange}</span>
@@ -467,7 +453,7 @@ export default function App() {
                     </div>
                     <div className="stats-row">
                       <span>This Batch:</span>
-                      <span>{downloadStats.filesDownloaded} downloaded, {downloadStats.filesFailed} failed</span>
+                      <span>{downloadStats.filesDownloaded} uploaded, {downloadStats.filesFailed} failed</span>
                     </div>
                     <div className="stats-row">
                       <span>Total Progress:</span>
@@ -476,10 +462,6 @@ export default function App() {
                     <div className="stats-row">
                       <span>Remaining:</span>
                       <span>{downloadStats.remainingFiles} files</span>
-                    </div>
-                    <div className="stats-row">
-                      <span>Last Batch Size:</span>
-                      <span>{downloadStats.sizeMB} MB</span>
                     </div>
                   </div>
                 )}
