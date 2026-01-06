@@ -686,10 +686,27 @@ async def gcs_status():
         )
 
 
-def check_blob_exists_sync(bucket, blob_path):
-    """Synchronous check if blob exists in GCS"""
+def check_blob_exists_and_valid_sync(bucket, blob_path, min_size=100):
+    """
+    Check if blob exists in GCS AND is valid (not empty/corrupted).
+    Returns True only if file exists and is larger than min_size bytes.
+    This prevents skipping partially uploaded or corrupted files.
+    """
     blob = bucket.blob(blob_path)
-    return blob.exists()
+    if not blob.exists():
+        return False
+
+    # Reload to get metadata including size
+    blob.reload()
+    file_size = blob.size
+
+    # File must be at least min_size bytes to be considered valid
+    # Betfair bz2 files should be at least 100 bytes
+    if file_size is None or file_size < min_size:
+        logger.info(f"File {blob_path} exists but too small ({file_size} bytes), will re-download")
+        return False
+
+    return True
 
 
 def get_gcs_path_from_betfair_path(path):
@@ -871,16 +888,16 @@ async def stream_download(job_id: str):
 
                     job["currentFile"] = path.split('/')[-1]
 
-                    # Check if file already exists in GCS - SKIP if it does
+                    # Check if file already exists in GCS AND is valid - SKIP only if complete
                     gcs_path = get_gcs_path_from_betfair_path(path)
                     try:
                         loop = asyncio.get_event_loop()
-                        exists = await loop.run_in_executor(
+                        exists_and_valid = await loop.run_in_executor(
                             thread_executor,
-                            functools.partial(check_blob_exists_sync, bucket, gcs_path)
+                            functools.partial(check_blob_exists_and_valid_sync, bucket, gcs_path, 100)
                         )
-                        if exists:
-                            logger.debug(f"Skipping existing file: {gcs_path}")
+                        if exists_and_valid:
+                            logger.debug(f"Skipping existing valid file: {gcs_path}")
                             return {"success": True, "path": path, "skipped": True}
                     except Exception as check_err:
                         logger.warning(f"Error checking if {gcs_path} exists: {check_err}")
