@@ -18,7 +18,7 @@ html, body {
 body {
   font-family: 'Poppins', sans-serif;
   color: #e0e0e0;
-  overflow: hidden;
+  overflow-x: hidden;
 }
 
 /* INTRO VIDEO SCREEN */
@@ -64,11 +64,11 @@ body {
 }
 
 .app {
-  height: 100vh;
+  min-height: 100vh;
   width: 100%;
   display: flex;
   position: relative;
-  overflow: hidden;
+  overflow-x: hidden;
 }
 
 /* LOGIN SCREEN */
@@ -368,7 +368,7 @@ body {
 /* DASHBOARD */
 .dashboard {
   width: 100%;
-  height: 100%;
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
   position: relative;
@@ -409,8 +409,8 @@ body {
 
 .content {
   flex: 1;
-  overflow-y: auto;
   padding: 40px;
+  padding-bottom: 60px;
 }
 
 .content::-webkit-scrollbar {
@@ -698,6 +698,7 @@ body {
 @media (max-width: 768px) {
   .content {
     padding: 20px;
+    padding-bottom: 40px;
   }
 
   .glass-panel {
@@ -722,5 +723,43 @@ body {
 
   .app-title {
     font-size: 24px;
+  }
+
+  .header {
+    padding: 16px 20px;
+  }
+}
+
+@media (max-width: 480px) {
+  .content {
+    padding: 16px;
+    padding-bottom: 40px;
+  }
+
+  .glass-panel {
+    padding: 20px;
+    border-radius: 16px;
+  }
+
+  .panel-title {
+    font-size: 12px;
+  }
+
+  .result-value {
+    font-size: 20px;
+  }
+
+  .button-check,
+  .button-download {
+    padding: 12px;
+    font-size: 12px;
+  }
+
+  .stats-row {
+    font-size: 12px;
+  }
+
+  .preset-item {
+    font-size: 11px;
   }
 }
