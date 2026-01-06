@@ -532,6 +532,45 @@ body {
   color: #e0e0e0;
 }
 
+/* TIER SELECTION */
+.tier-section {
+  margin-bottom: 24px;
+}
+
+.tier-select {
+  width: 100%;
+  padding: 12px;
+  background: rgba(20, 30, 50, 0.5);
+  border: 1px solid rgba(0, 212, 255, 0.3);
+  border-radius: 10px;
+  color: #e0e0e0;
+  font-size: 13px;
+  font-family: 'Poppins', sans-serif;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  backdrop-filter: blur(10px);
+  margin-top: 8px;
+}
+
+.tier-select:focus {
+  outline: none;
+  border-color: #00D4FF;
+  background: rgba(20, 30, 50, 0.7);
+  box-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+}
+
+.tier-select option {
+  background: #1a1f2e;
+  color: #e0e0e0;
+}
+
+.tier-description {
+  font-size: 11px;
+  color: #888;
+  margin-top: 8px;
+  font-style: italic;
+}
+
 .preset-values {
   background: rgba(157, 78, 221, 0.1);
   border: 1px solid rgba(157, 78, 221, 0.2);

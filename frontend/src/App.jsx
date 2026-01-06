@@ -21,6 +21,14 @@ export default function App() {
   const [toMonth, setToMonth] = useState('12');
   const [toYear, setToYear] = useState('2024');
 
+  // Data tier selection
+  const [selectedPlan, setSelectedPlan] = useState('Basic Plan');
+  const DATA_TIERS = [
+    { value: 'Basic Plan', label: 'Basic Plan', description: 'Standard market data' },
+    { value: 'Advanced Plan', label: 'Advanced Plan', description: 'Detailed tick-level data' },
+    { value: 'Pro Plan', label: 'Pro Plan', description: 'Full depth market data' }
+  ];
+
   // Pre-selected defaults (hardcoded)
   const selectedMarkets = []; // All market types
   const selectedCountries = ['GB']; // Only GB
@@ -79,7 +87,7 @@ export default function App() {
       const response = await axios.post(`${API_BASE}/api/getAdvBasketDataSize`, {
         ssoid,
         sport: 'Horse Racing',
-        plan: 'Basic Plan',
+        plan: selectedPlan,
         fromDay: 1,
         fromMonth: parseInt(fromMonth),
         fromYear: parseInt(fromYear),
@@ -119,7 +127,7 @@ export default function App() {
         const listResponse = await axios.post(`${API_BASE}/api/downloadListOfFiles`, {
           ssoid,
           sport: 'Horse Racing',
-          plan: 'Basic Plan',
+          plan: selectedPlan,
           fromDay: 1,
           fromMonth: parseInt(fromMonth),
           fromYear: parseInt(fromYear),
@@ -367,6 +375,33 @@ export default function App() {
                     </select>
                   </div>
                 </div>
+              </div>
+
+              <div className="tier-section">
+                <label className="date-label">Data Tier</label>
+                <select
+                  className="tier-select"
+                  value={selectedPlan}
+                  onChange={(e) => {
+                    setSelectedPlan(e.target.value);
+                    setHasChecked(false);
+                    setFileCount(0);
+                    setTotalSizeMB(0);
+                    setDownloadStats(null);
+                    setAllFilePaths([]);
+                    setDownloadedSoFar(0);
+                    setCurrentBatch(0);
+                  }}
+                >
+                  {DATA_TIERS.map((tier) => (
+                    <option key={tier.value} value={tier.value}>
+                      {tier.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="tier-description">
+                  {DATA_TIERS.find(t => t.value === selectedPlan)?.description}
+                </p>
               </div>
 
               <div className="preset-values">
