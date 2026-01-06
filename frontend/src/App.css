@@ -802,6 +802,10 @@ body {
   color: #4ade80;
 }
 
+.stat-value.skipped {
+  color: #ffc107;
+}
+
 .stat-value.error {
   color: #FF6B6B;
 }

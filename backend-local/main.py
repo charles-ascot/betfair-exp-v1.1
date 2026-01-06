@@ -686,15 +686,53 @@ async def gcs_status():
         )
 
 
+def check_blob_exists_sync(bucket, blob_path):
+    """Synchronous check if blob exists in GCS"""
+    blob = bucket.blob(blob_path)
+    return blob.exists()
+
+
+def get_gcs_path_from_betfair_path(path):
+    """Convert Betfair file path to clean GCS path"""
+    gcs_path = path.lstrip('/')
+
+    # Remove Betfair's internal directory prefixes
+    prefixes_to_remove = [
+        'xds_nfs/edp_processed/',
+        'xds_nfs/hdfs_supreme/',
+        'xds_nfs/'
+    ]
+    for prefix in prefixes_to_remove:
+        if gcs_path.startswith(prefix):
+            gcs_path = gcs_path[len(prefix):]
+            break
+
+    return gcs_path
+
+
 @app.post("/api/startDownloadJob")
 async def start_download_job(data: dict):
     """
     Start a new download job and return a job ID.
     The client will use this ID to stream progress via SSE.
+    Stores original request parameters to prevent deviation.
     """
     try:
         ssoid = data.get("ssoid")
         file_paths = data.get("filePaths", [])
+
+        # Store the original request parameters for verification
+        request_params = {
+            "plan": data.get("plan"),
+            "sport": data.get("sport"),
+            "fromMonth": data.get("fromMonth"),
+            "fromYear": data.get("fromYear"),
+            "toMonth": data.get("toMonth"),
+            "toYear": data.get("toYear"),
+            "countriesCollection": data.get("countriesCollection"),
+            "fileTypeCollection": data.get("fileTypeCollection"),
+            "marketTypesCollection": data.get("marketTypesCollection"),
+        }
 
         if not ssoid:
             raise HTTPException(status_code=400, detail="Missing ssoid")
@@ -703,7 +741,7 @@ async def start_download_job(data: dict):
 
         job_id = str(uuid.uuid4())
 
-        # Initialize job state
+        # Initialize job state with original request parameters
         active_downloads[job_id] = {
             "status": "pending",
             "ssoid": ssoid,
@@ -711,17 +749,24 @@ async def start_download_job(data: dict):
             "totalFiles": len(file_paths),
             "completedFiles": 0,
             "failedFiles": 0,
+            "skippedFiles": 0,  # Files already in GCS
             "uploadedFiles": [],
             "currentFile": None,
             "startTime": datetime.now().isoformat(),
             "aborted": False,
-            "error": None
+            "error": None,
+            "requestParams": request_params  # Store original request for reference
         }
         failed_files_registry[job_id] = []
 
         logger.info(f"Created download job {job_id} with {len(file_paths)} files")
+        logger.info(f"Job parameters: {request_params}")
 
-        return {"jobId": job_id, "totalFiles": len(file_paths)}
+        return {
+            "jobId": job_id,
+            "totalFiles": len(file_paths),
+            "requestParams": request_params  # Return params so frontend can verify
+        }
 
     except HTTPException:
         raise
@@ -805,16 +850,17 @@ async def stream_download(job_id: str):
                 "Content-Type": "application/json"
             }
 
-            # Send initial event
-            yield f"data: {json.dumps({'type': 'start', 'totalFiles': len(file_paths), 'jobId': job_id})}\n\n"
+            # Send initial event with request params for verification
+            yield f"data: {json.dumps({'type': 'start', 'totalFiles': len(file_paths), 'jobId': job_id, 'requestParams': job.get('requestParams', {})})}\n\n"
 
             # Process files with higher concurrency (25 concurrent)
             semaphore = asyncio.Semaphore(25)
             completed = 0
             failed = 0
+            skipped = 0
 
             async def download_and_upload_single(path, index):
-                nonlocal completed, failed
+                nonlocal completed, failed, skipped
 
                 if job["aborted"]:
                     return None
@@ -824,6 +870,22 @@ async def stream_download(job_id: str):
                         return None
 
                     job["currentFile"] = path.split('/')[-1]
+
+                    # Check if file already exists in GCS - SKIP if it does
+                    gcs_path = get_gcs_path_from_betfair_path(path)
+                    try:
+                        loop = asyncio.get_event_loop()
+                        exists = await loop.run_in_executor(
+                            thread_executor,
+                            functools.partial(check_blob_exists_sync, bucket, gcs_path)
+                        )
+                        if exists:
+                            logger.debug(f"Skipping existing file: {gcs_path}")
+                            return {"success": True, "path": path, "skipped": True}
+                    except Exception as check_err:
+                        logger.warning(f"Error checking if {gcs_path} exists: {check_err}")
+                        # Continue with download if check fails
+
                     encoded_path = urllib.parse.quote(path, safe='')
                     download_url = f"{HISTORIC_DATA_BASE}/DownloadFile?filePath={encoded_path}"
 
@@ -855,29 +917,13 @@ async def stream_download(job_id: str):
                                     last_error = "File too small"
                                     break
 
-                                # Upload to GCS - clean up Betfair's internal path structure
-                                # Input path looks like: /xds_nfs/edp_processed/BASIC/2024/Jan/1/32905938/file.bz2
-                                # We want: BASIC/2024/Jan/1/32905938/file.bz2
-                                gcs_path = path.lstrip('/')
-
-                                # Remove Betfair's internal directory prefixes
-                                prefixes_to_remove = [
-                                    'xds_nfs/edp_processed/',
-                                    'xds_nfs/hdfs_supreme/',
-                                    'xds_nfs/'
-                                ]
-                                for prefix in prefixes_to_remove:
-                                    if gcs_path.startswith(prefix):
-                                        gcs_path = gcs_path[len(prefix):]
-                                        break
-
                                 try:
                                     loop = asyncio.get_event_loop()
                                     await loop.run_in_executor(
                                         thread_executor,
                                         functools.partial(upload_to_gcs_sync, bucket, gcs_path, content)
                                     )
-                                    return {"success": True, "path": path}
+                                    return {"success": True, "path": path, "skipped": False}
                                 except Exception as gcs_err:
                                     last_error = f"GCS upload failed: {str(gcs_err)}"
                                     break
@@ -903,7 +949,7 @@ async def stream_download(job_id: str):
 
             for i in range(0, len(file_paths), chunk_size):
                 if job["aborted"]:
-                    yield f"data: {json.dumps({'type': 'aborted', 'completed': completed, 'failed': failed})}\n\n"
+                    yield f"data: {json.dumps({'type': 'aborted', 'completed': completed, 'failed': failed, 'skipped': skipped})}\n\n"
                     break
 
                 chunk = file_paths[i:i + chunk_size]
@@ -914,8 +960,12 @@ async def stream_download(job_id: str):
                     if result is None:
                         continue
                     if result["success"]:
-                        completed += 1
-                        job["completedFiles"] = completed
+                        if result.get("skipped", False):
+                            skipped += 1
+                            job["skippedFiles"] = skipped
+                        else:
+                            completed += 1
+                            job["completedFiles"] = completed
                     else:
                         failed += 1
                         job["failedFiles"] = failed
@@ -924,15 +974,16 @@ async def stream_download(job_id: str):
                             "error": result.get("error", "Unknown error")
                         })
 
-                # Send progress event
-                progress_pct = round((completed + failed) / len(file_paths) * 100, 1)
-                yield f"data: {json.dumps({'type': 'progress', 'completed': completed, 'failed': failed, 'total': len(file_paths), 'percent': progress_pct, 'currentFile': job['currentFile']})}\n\n"
+                # Send progress event - include skipped in progress calculation
+                total_processed = completed + failed + skipped
+                progress_pct = round(total_processed / len(file_paths) * 100, 1)
+                yield f"data: {json.dumps({'type': 'progress', 'completed': completed, 'failed': failed, 'skipped': skipped, 'total': len(file_paths), 'percent': progress_pct, 'currentFile': job['currentFile']})}\n\n"
 
             if not job["aborted"]:
                 job["status"] = "completed"
-                yield f"data: {json.dumps({'type': 'complete', 'completed': completed, 'failed': failed, 'total': len(file_paths), 'bucket': GCS_BUCKET_NAME})}\n\n"
+                yield f"data: {json.dumps({'type': 'complete', 'completed': completed, 'failed': failed, 'skipped': skipped, 'total': len(file_paths), 'bucket': GCS_BUCKET_NAME})}\n\n"
 
-            logger.info(f"Job {job_id} finished: {completed} uploaded, {failed} failed")
+            logger.info(f"Job {job_id} finished: {completed} uploaded, {skipped} skipped, {failed} failed")
 
         except Exception as e:
             logger.error(f"Stream download error for job {job_id}: {str(e)}", exc_info=True)

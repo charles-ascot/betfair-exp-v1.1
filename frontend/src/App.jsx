@@ -158,11 +158,21 @@ export default function App() {
         return;
       }
 
-      // Step 2: Start download job
+      // Step 2: Start download job with request parameters
       setSuccess('Starting download job...');
       const jobResponse = await axios.post(`${API_BASE}/api/startDownloadJob`, {
         ssoid,
-        filePaths
+        filePaths,
+        // Include request parameters for caching/verification
+        plan: selectedPlan,
+        sport: 'Horse Racing',
+        fromMonth: parseInt(fromMonth),
+        fromYear: parseInt(fromYear),
+        toMonth: parseInt(toMonth),
+        toYear: parseInt(toYear),
+        countriesCollection: selectedCountries,
+        fileTypeCollection: selectedFileTypes,
+        marketTypesCollection: selectedMarkets
       });
 
       const jobId = jobResponse.data.jobId;
@@ -184,9 +194,11 @@ export default function App() {
               setDownloadProgress({
                 completed: 0,
                 failed: 0,
+                skipped: 0,
                 total: data.totalFiles,
                 percent: 0,
-                currentFile: null
+                currentFile: null,
+                requestParams: data.requestParams
               });
               break;
 
@@ -194,6 +206,7 @@ export default function App() {
               setDownloadProgress({
                 completed: data.completed,
                 failed: data.failed,
+                skipped: data.skipped || 0,
                 total: data.total,
                 percent: data.percent,
                 currentFile: data.currentFile
@@ -205,6 +218,7 @@ export default function App() {
               setDownloadProgress({
                 completed: data.completed,
                 failed: data.failed,
+                skipped: data.skipped || 0,
                 total: data.total,
                 percent: 100,
                 currentFile: null,
@@ -212,7 +226,8 @@ export default function App() {
               });
               setDownloadComplete(true);
               setIsDownloading(false);
-              setSuccess(`Download complete! ${data.completed} files uploaded to gs://${data.bucket}/`);
+              const skippedMsg = data.skipped > 0 ? ` (${data.skipped} already existed)` : '';
+              setSuccess(`Download complete! ${data.completed} files uploaded to gs://${data.bucket}/${skippedMsg}`);
               eventSource.close();
               eventSourceRef.current = null;
               break;
@@ -221,10 +236,11 @@ export default function App() {
               setDownloadProgress(prev => ({
                 ...prev,
                 completed: data.completed,
-                failed: data.failed
+                failed: data.failed,
+                skipped: data.skipped || 0
               }));
               setIsDownloading(false);
-              setSuccess(`Download aborted. ${data.completed} files completed, ${data.failed} failed.`);
+              setSuccess(`Download aborted. ${data.completed} files completed, ${data.skipped || 0} skipped, ${data.failed} failed.`);
               eventSource.close();
               eventSourceRef.current = null;
               break;
@@ -628,6 +644,12 @@ export default function App() {
                         <span className="stat-label">Completed:</span>
                         <span className="stat-value success">{downloadProgress.completed.toLocaleString()}</span>
                       </div>
+                      {downloadProgress.skipped > 0 && (
+                        <div className="progress-stat">
+                          <span className="stat-label">Skipped:</span>
+                          <span className="stat-value skipped">{downloadProgress.skipped.toLocaleString()}</span>
+                        </div>
+                      )}
                       <div className="progress-stat">
                         <span className="stat-label">Failed:</span>
                         <span className="stat-value error">{downloadProgress.failed.toLocaleString()}</span>
@@ -716,6 +738,12 @@ export default function App() {
                       <span>Files Uploaded:</span>
                       <span>{downloadProgress.completed.toLocaleString()}</span>
                     </div>
+                    {downloadProgress.skipped > 0 && (
+                      <div className="stats-row">
+                        <span>Files Skipped (already exist):</span>
+                        <span>{downloadProgress.skipped.toLocaleString()}</span>
+                      </div>
+                    )}
                     <div className="stats-row">
                       <span>Files Failed:</span>
                       <span>{downloadProgress.failed.toLocaleString()}</span>
