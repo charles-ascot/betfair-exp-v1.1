@@ -681,6 +681,23 @@ export default function App() {
                       All files uploaded successfully!
                     </div>
                   )}
+
+                  {/* Reset Button - shown when there's progress data and not currently downloading */}
+                  {downloadProgress && !isDownloading && (
+                    <button
+                      className="button-reset"
+                      onClick={() => {
+                        setDownloadProgress(null);
+                        setCurrentJobId(null);
+                        setFailedFilesCount(0);
+                        setDownloadComplete(false);
+                        setSuccess('');
+                        setError('');
+                      }}
+                    >
+                      Reset / New Download
+                    </button>
+                  )}
                 </div>
 
                 {/* Stats Summary */}

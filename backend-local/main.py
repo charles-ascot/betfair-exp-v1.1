@@ -855,10 +855,21 @@ async def stream_download(job_id: str):
                                     last_error = "File too small"
                                     break
 
-                                # Upload to GCS
+                                # Upload to GCS - clean up Betfair's internal path structure
+                                # Input path looks like: /xds_nfs/edp_processed/BASIC/2024/Jan/1/32905938/file.bz2
+                                # We want: BASIC/2024/Jan/1/32905938/file.bz2
                                 gcs_path = path.lstrip('/')
-                                if gcs_path.startswith('xds_nfs/hdfs_supreme/'):
-                                    gcs_path = gcs_path[21:]
+
+                                # Remove Betfair's internal directory prefixes
+                                prefixes_to_remove = [
+                                    'xds_nfs/edp_processed/',
+                                    'xds_nfs/hdfs_supreme/',
+                                    'xds_nfs/'
+                                ]
+                                for prefix in prefixes_to_remove:
+                                    if gcs_path.startswith(prefix):
+                                        gcs_path = gcs_path[len(prefix):]
+                                        break
 
                                 try:
                                     loop = asyncio.get_event_loop()

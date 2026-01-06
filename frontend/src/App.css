@@ -870,6 +870,31 @@ body {
   cursor: not-allowed;
 }
 
+/* RESET BUTTON */
+.button-reset {
+  width: 100%;
+  padding: 14px;
+  background: linear-gradient(135deg, #6c757d 0%, #495057 100%);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-family: 'Lexend', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 8px 24px rgba(108, 117, 125, 0.3);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 12px;
+}
+
+.button-reset:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 32px rgba(108, 117, 125, 0.4);
+  background: linear-gradient(135deg, #5a6268 0%, #3d4246 100%);
+}
+
 /* DOWNLOAD COMPLETE */
 .download-complete {
   background: rgba(74, 222, 128, 0.1);
