@@ -31,7 +31,7 @@ export default function App() {
 
   // Pre-selected defaults (hardcoded)
   const selectedMarkets = []; // All market types
-  const selectedCountries = ['GB']; // Only GB
+  const selectedCountries = ['GB', 'IE']; // GB and Ireland
   const selectedFileTypes = ['M', 'E']; // Both M and E
 
   const [fileCount, setFileCount] = useState(0);
@@ -586,7 +586,7 @@ export default function App() {
                 </div>
                 <div className="preset-item">
                   <span className="preset-label">Country:</span>
-                  <span className="preset-value">GB</span>
+                  <span className="preset-value">GB & IE</span>
                 </div>
                 <div className="preset-item">
                   <span className="preset-label">File Types:</span>
