@@ -8,6 +8,9 @@ import urllib.parse
 import asyncio
 import zipfile
 import io
+import json
+import uuid
+from datetime import datetime
 from google.cloud import storage
 from concurrent.futures import ThreadPoolExecutor
 import functools
@@ -16,6 +19,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+# Global state for tracking active downloads and failed files
+active_downloads = {}  # job_id -> download state
+failed_files_registry = {}  # job_id -> list of failed file paths
 
 app.add_middleware(
     CORSMiddleware,
@@ -677,3 +684,303 @@ async def gcs_status():
             },
             status_code=500
         )
+
+
+@app.post("/api/startDownloadJob")
+async def start_download_job(data: dict):
+    """
+    Start a new download job and return a job ID.
+    The client will use this ID to stream progress via SSE.
+    """
+    try:
+        ssoid = data.get("ssoid")
+        file_paths = data.get("filePaths", [])
+
+        if not ssoid:
+            raise HTTPException(status_code=400, detail="Missing ssoid")
+        if not file_paths:
+            raise HTTPException(status_code=400, detail="No files to download")
+
+        job_id = str(uuid.uuid4())
+
+        # Initialize job state
+        active_downloads[job_id] = {
+            "status": "pending",
+            "ssoid": ssoid,
+            "filePaths": file_paths,
+            "totalFiles": len(file_paths),
+            "completedFiles": 0,
+            "failedFiles": 0,
+            "uploadedFiles": [],
+            "currentFile": None,
+            "startTime": datetime.now().isoformat(),
+            "aborted": False,
+            "error": None
+        }
+        failed_files_registry[job_id] = []
+
+        logger.info(f"Created download job {job_id} with {len(file_paths)} files")
+
+        return {"jobId": job_id, "totalFiles": len(file_paths)}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"startDownloadJob error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/abortDownloadJob/{job_id}")
+async def abort_download_job(job_id: str):
+    """Abort an active download job"""
+    if job_id not in active_downloads:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    active_downloads[job_id]["aborted"] = True
+    active_downloads[job_id]["status"] = "aborted"
+    logger.info(f"Aborted download job {job_id}")
+
+    return {"success": True, "jobId": job_id, "status": "aborted"}
+
+
+@app.get("/api/downloadJobStatus/{job_id}")
+async def get_download_job_status(job_id: str):
+    """Get current status of a download job"""
+    if job_id not in active_downloads:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = active_downloads[job_id]
+    return {
+        "jobId": job_id,
+        "status": job["status"],
+        "totalFiles": job["totalFiles"],
+        "completedFiles": job["completedFiles"],
+        "failedFiles": job["failedFiles"],
+        "currentFile": job["currentFile"],
+        "aborted": job["aborted"],
+        "error": job["error"]
+    }
+
+
+@app.get("/api/getFailedFiles/{job_id}")
+async def get_failed_files(job_id: str):
+    """Get list of failed files for a job"""
+    if job_id not in failed_files_registry:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    return {
+        "jobId": job_id,
+        "failedFiles": failed_files_registry[job_id],
+        "count": len(failed_files_registry[job_id])
+    }
+
+
+@app.get("/api/streamDownload/{job_id}")
+async def stream_download(job_id: str):
+    """
+    SSE endpoint that streams download progress.
+    Executes the actual downloads and streams progress events.
+    """
+    if job_id not in active_downloads:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = active_downloads[job_id]
+
+    if job["status"] not in ["pending", "running"]:
+        raise HTTPException(status_code=400, detail=f"Job already {job['status']}")
+
+    async def event_generator():
+        try:
+            if gcs_client is None:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'GCS client not initialized'})}\n\n"
+                return
+
+            job["status"] = "running"
+            bucket = gcs_client.bucket(GCS_BUCKET_NAME)
+            ssoid = job["ssoid"]
+            file_paths = job["filePaths"]
+
+            headers = {
+                "ssoid": ssoid,
+                "Content-Type": "application/json"
+            }
+
+            # Send initial event
+            yield f"data: {json.dumps({'type': 'start', 'totalFiles': len(file_paths), 'jobId': job_id})}\n\n"
+
+            # Process files with higher concurrency (25 concurrent)
+            semaphore = asyncio.Semaphore(25)
+            completed = 0
+            failed = 0
+
+            async def download_and_upload_single(path, index):
+                nonlocal completed, failed
+
+                if job["aborted"]:
+                    return None
+
+                async with semaphore:
+                    if job["aborted"]:
+                        return None
+
+                    job["currentFile"] = path.split('/')[-1]
+                    encoded_path = urllib.parse.quote(path, safe='')
+                    download_url = f"{HISTORIC_DATA_BASE}/DownloadFile?filePath={encoded_path}"
+
+                    # Retry logic
+                    max_retries = 3
+                    last_error = None
+
+                    for attempt in range(max_retries):
+                        if job["aborted"]:
+                            return None
+
+                        try:
+                            response = await http_client.get(download_url, headers=headers)
+
+                            if response.status_code == 429:
+                                wait_time = (attempt + 1) * 2
+                                await asyncio.sleep(wait_time)
+                                continue
+
+                            if response.status_code == 200:
+                                content = response.content
+                                content_str = content[:500].decode('utf-8', errors='ignore').lower()
+
+                                if '<html' in content_str or '<!doctype' in content_str:
+                                    last_error = "Session expired"
+                                    break
+
+                                if len(content) < 100:
+                                    last_error = "File too small"
+                                    break
+
+                                # Upload to GCS
+                                gcs_path = path.lstrip('/')
+                                if gcs_path.startswith('xds_nfs/hdfs_supreme/'):
+                                    gcs_path = gcs_path[21:]
+
+                                try:
+                                    loop = asyncio.get_event_loop()
+                                    await loop.run_in_executor(
+                                        thread_executor,
+                                        functools.partial(upload_to_gcs_sync, bucket, gcs_path, content)
+                                    )
+                                    return {"success": True, "path": path}
+                                except Exception as gcs_err:
+                                    last_error = f"GCS upload failed: {str(gcs_err)}"
+                                    break
+                            else:
+                                last_error = f"HTTP {response.status_code}"
+                                if attempt < max_retries - 1:
+                                    await asyncio.sleep((attempt + 1) * 1)
+                                    continue
+                                break
+
+                        except Exception as e:
+                            last_error = str(e)
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep((attempt + 1) * 1)
+                                continue
+                            break
+
+                    # If we get here without returning, it failed
+                    return {"success": False, "path": path, "error": last_error}
+
+            # Process in chunks to send progress updates
+            chunk_size = 50  # Send update every 50 files
+
+            for i in range(0, len(file_paths), chunk_size):
+                if job["aborted"]:
+                    yield f"data: {json.dumps({'type': 'aborted', 'completed': completed, 'failed': failed})}\n\n"
+                    break
+
+                chunk = file_paths[i:i + chunk_size]
+                tasks = [download_and_upload_single(path, i + idx) for idx, path in enumerate(chunk)]
+                results = await asyncio.gather(*tasks)
+
+                for result in results:
+                    if result is None:
+                        continue
+                    if result["success"]:
+                        completed += 1
+                        job["completedFiles"] = completed
+                    else:
+                        failed += 1
+                        job["failedFiles"] = failed
+                        failed_files_registry[job_id].append({
+                            "path": result["path"],
+                            "error": result.get("error", "Unknown error")
+                        })
+
+                # Send progress event
+                progress_pct = round((completed + failed) / len(file_paths) * 100, 1)
+                yield f"data: {json.dumps({'type': 'progress', 'completed': completed, 'failed': failed, 'total': len(file_paths), 'percent': progress_pct, 'currentFile': job['currentFile']})}\n\n"
+
+            if not job["aborted"]:
+                job["status"] = "completed"
+                yield f"data: {json.dumps({'type': 'complete', 'completed': completed, 'failed': failed, 'total': len(file_paths), 'bucket': GCS_BUCKET_NAME})}\n\n"
+
+            logger.info(f"Job {job_id} finished: {completed} uploaded, {failed} failed")
+
+        except Exception as e:
+            logger.error(f"Stream download error for job {job_id}: {str(e)}", exc_info=True)
+            job["status"] = "error"
+            job["error"] = str(e)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@app.post("/api/retryFailedFiles/{job_id}")
+async def retry_failed_files(job_id: str, data: dict):
+    """
+    Retry downloading failed files from a previous job.
+    Creates a new job with only the failed files.
+    """
+    if job_id not in failed_files_registry:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    failed_files = failed_files_registry[job_id]
+    if not failed_files:
+        return {"success": True, "message": "No failed files to retry", "newJobId": None}
+
+    ssoid = data.get("ssoid")
+    if not ssoid:
+        raise HTTPException(status_code=400, detail="Missing ssoid")
+
+    # Create new job with failed file paths
+    file_paths = [f["path"] for f in failed_files]
+    new_job_id = str(uuid.uuid4())
+
+    active_downloads[new_job_id] = {
+        "status": "pending",
+        "ssoid": ssoid,
+        "filePaths": file_paths,
+        "totalFiles": len(file_paths),
+        "completedFiles": 0,
+        "failedFiles": 0,
+        "uploadedFiles": [],
+        "currentFile": None,
+        "startTime": datetime.now().isoformat(),
+        "aborted": False,
+        "error": None,
+        "isRetry": True,
+        "originalJobId": job_id
+    }
+    failed_files_registry[new_job_id] = []
+
+    # Clear original job's failed files
+    failed_files_registry[job_id] = []
+
+    logger.info(f"Created retry job {new_job_id} with {len(file_paths)} files from job {job_id}")
+
+    return {"success": True, "newJobId": new_job_id, "totalFiles": len(file_paths)}

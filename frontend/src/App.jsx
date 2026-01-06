@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import './App.css';
 
@@ -37,10 +37,23 @@ export default function App() {
   const [fileCount, setFileCount] = useState(0);
   const [totalSizeMB, setTotalSizeMB] = useState(0);
   const [hasChecked, setHasChecked] = useState(false);
-  const [downloadStats, setDownloadStats] = useState(null);
-  const [allFilePaths, setAllFilePaths] = useState([]);
-  const [downloadedSoFar, setDownloadedSoFar] = useState(0);
-  const [currentBatch, setCurrentBatch] = useState(0);
+
+  // New streaming download state
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(null);
+  const [currentJobId, setCurrentJobId] = useState(null);
+  const [failedFilesCount, setFailedFilesCount] = useState(0);
+  const [downloadComplete, setDownloadComplete] = useState(false);
+  const eventSourceRef = useRef(null);
+
+  // Clean up EventSource on unmount
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, []);
 
   // Clear results when date range changes
   const handleDateChange = (setter) => (e) => {
@@ -48,10 +61,10 @@ export default function App() {
     setHasChecked(false);
     setFileCount(0);
     setTotalSizeMB(0);
-    setDownloadStats(null);
-    setAllFilePaths([]);
-    setDownloadedSoFar(0);
-    setCurrentBatch(0);
+    setDownloadProgress(null);
+    setCurrentJobId(null);
+    setFailedFilesCount(0);
+    setDownloadComplete(false);
   };
 
   const handleConnect = async () => {
@@ -102,6 +115,8 @@ export default function App() {
       setFileCount(response.data.fileCount);
       setTotalSizeMB(response.data.totalSizeMB);
       setHasChecked(true);
+      setDownloadComplete(false);
+      setDownloadProgress(null);
       setSuccess(`Found ${response.data.fileCount} files, ${response.data.totalSizeMB} MB total`);
       setTimeout(() => setSuccess(''), 4000);
     } catch (err) {
@@ -111,107 +126,134 @@ export default function App() {
     }
   };
 
-  const BATCH_SIZE = 500;
-
-  const handleDownload = async () => {
-    setLoading(true);
+  const handleStartDownload = async () => {
     setError('');
     setSuccess('');
+    setIsDownloading(true);
+    setDownloadComplete(false);
+    setFailedFilesCount(0);
 
     try {
-      let filePaths = allFilePaths;
+      // Step 1: Get list of files
+      setSuccess('Fetching file list from Betfair...');
+      const listResponse = await axios.post(`${API_BASE}/api/downloadListOfFiles`, {
+        ssoid,
+        sport: 'Horse Racing',
+        plan: selectedPlan,
+        fromDay: 1,
+        fromMonth: parseInt(fromMonth),
+        fromYear: parseInt(fromYear),
+        toDay: 31,
+        toMonth: parseInt(toMonth),
+        toYear: parseInt(toYear),
+        marketTypesCollection: selectedMarkets,
+        countriesCollection: selectedCountries,
+        fileTypeCollection: selectedFileTypes
+      });
 
-      // If we don't have file paths yet, fetch them
-      if (filePaths.length === 0) {
-        setSuccess('Fetching file list from Betfair...');
-        const listResponse = await axios.post(`${API_BASE}/api/downloadListOfFiles`, {
-          ssoid,
-          sport: 'Horse Racing',
-          plan: selectedPlan,
-          fromDay: 1,
-          fromMonth: parseInt(fromMonth),
-          fromYear: parseInt(fromYear),
-          toDay: 31,
-          toMonth: parseInt(toMonth),
-          toYear: parseInt(toYear),
-          marketTypesCollection: selectedMarkets,
-          countriesCollection: selectedCountries,
-          fileTypeCollection: selectedFileTypes
-        });
+      const filePaths = listResponse.data;
+      if (!filePaths || filePaths.length === 0) {
+        setError('No files found to download');
+        setIsDownloading(false);
+        return;
+      }
 
-        filePaths = listResponse.data;
-        if (!filePaths || filePaths.length === 0) {
-          setError('No files found to download');
-          setLoading(false);
-          return;
+      // Step 2: Start download job
+      setSuccess('Starting download job...');
+      const jobResponse = await axios.post(`${API_BASE}/api/startDownloadJob`, {
+        ssoid,
+        filePaths
+      });
+
+      const jobId = jobResponse.data.jobId;
+      setCurrentJobId(jobId);
+
+      // Step 3: Connect to SSE stream for progress
+      setSuccess('Connecting to download stream...');
+
+      const eventSource = new EventSource(`${API_BASE}/api/streamDownload/${jobId}`);
+      eventSourceRef.current = eventSource;
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          switch (data.type) {
+            case 'start':
+              setSuccess(`Download started: ${data.totalFiles} files`);
+              setDownloadProgress({
+                completed: 0,
+                failed: 0,
+                total: data.totalFiles,
+                percent: 0,
+                currentFile: null
+              });
+              break;
+
+            case 'progress':
+              setDownloadProgress({
+                completed: data.completed,
+                failed: data.failed,
+                total: data.total,
+                percent: data.percent,
+                currentFile: data.currentFile
+              });
+              setFailedFilesCount(data.failed);
+              break;
+
+            case 'complete':
+              setDownloadProgress({
+                completed: data.completed,
+                failed: data.failed,
+                total: data.total,
+                percent: 100,
+                currentFile: null,
+                bucket: data.bucket
+              });
+              setDownloadComplete(true);
+              setIsDownloading(false);
+              setSuccess(`Download complete! ${data.completed} files uploaded to gs://${data.bucket}/`);
+              eventSource.close();
+              eventSourceRef.current = null;
+              break;
+
+            case 'aborted':
+              setDownloadProgress(prev => ({
+                ...prev,
+                completed: data.completed,
+                failed: data.failed
+              }));
+              setIsDownloading(false);
+              setSuccess(`Download aborted. ${data.completed} files completed, ${data.failed} failed.`);
+              eventSource.close();
+              eventSourceRef.current = null;
+              break;
+
+            case 'error':
+              setError(`Download error: ${data.message}`);
+              setIsDownloading(false);
+              eventSource.close();
+              eventSourceRef.current = null;
+              break;
+
+            default:
+              console.log('Unknown event type:', data.type);
+          }
+        } catch (e) {
+          console.error('Error parsing SSE data:', e);
         }
-        setAllFilePaths(filePaths);
-        setDownloadedSoFar(0);
-        setCurrentBatch(0);
-      }
-
-      // Calculate which batch we're on
-      const startIndex = downloadedSoFar;
-      const remainingFiles = filePaths.slice(startIndex);
-
-      if (remainingFiles.length === 0) {
-        setSuccess('All files have been downloaded!');
-        setLoading(false);
-        return;
-      }
-
-      const batchFiles = remainingFiles.slice(0, BATCH_SIZE);
-      const batchNumber = currentBatch + 1;
-      const totalBatches = Math.ceil(filePaths.length / BATCH_SIZE);
-
-      setSuccess(`Uploading batch ${batchNumber}/${totalBatches} to Cloud Storage: ${batchFiles.length} files...`);
-
-      // Upload this batch to GCS
-      const uploadResponse = await axios.post(
-        `${API_BASE}/api/downloadFilesToGCS`,
-        { ssoid, filePaths: batchFiles },
-        { timeout: 600000 }
-      );
-
-      const data = uploadResponse.data;
-
-      // Check for errors
-      if (!data.success) {
-        setError('Upload failed. Please logout and login with a new ssoid.');
-        setLoading(false);
-        return;
-      }
-
-      // Get actual upload stats from response
-      const filesRequested = data.filesRequested || batchFiles.length;
-      const filesDownloaded = data.filesUploaded || 0;
-      const filesFailed = data.filesFailed || 0;
-
-      // Update progress tracking
-      const newDownloadedSoFar = downloadedSoFar + filesDownloaded;
-      setDownloadedSoFar(newDownloadedSoFar);
-      setCurrentBatch(batchNumber);
-
-      // Calculate and show stats
-      const stats = {
-        batchNumber,
-        totalBatches,
-        filesRequested,
-        filesDownloaded,
-        filesFailed,
-        totalDownloaded: newDownloadedSoFar,
-        totalAvailable: filePaths.length,
-        remainingFiles: filePaths.length - newDownloadedSoFar,
-        bucket: data.bucket,
-        dateRange: `${MONTHS[parseInt(fromMonth)-1]} ${fromYear} - ${MONTHS[parseInt(toMonth)-1]} ${toYear}`
       };
-      setDownloadStats(stats);
 
-      if (newDownloadedSoFar < filePaths.length) {
-        setSuccess(`Batch ${batchNumber} complete! ${filesDownloaded} files uploaded to gs://${data.bucket}/. Click again for next batch.`);
-      } else {
-        setSuccess(`All uploads complete! ${newDownloadedSoFar} files saved to gs://${data.bucket}/`);
-      }
+      eventSource.onerror = (err) => {
+        console.error('SSE error:', err);
+        if (eventSource.readyState === EventSource.CLOSED) {
+          setIsDownloading(false);
+          if (!downloadComplete) {
+            setError('Connection to server lost. Check your download progress.');
+          }
+        }
+      };
+
     } catch (err) {
       console.error('Download error:', err);
       const errorMsg = err.response?.data?.detail || err.message || 'Unknown error';
@@ -220,8 +262,116 @@ export default function App() {
       } else {
         setError(`Download failed: ${errorMsg}`);
       }
-    } finally {
-      setLoading(false);
+      setIsDownloading(false);
+    }
+  };
+
+  const handleAbortDownload = async () => {
+    if (!currentJobId) return;
+
+    try {
+      await axios.post(`${API_BASE}/api/abortDownloadJob/${currentJobId}`);
+      setSuccess('Abort signal sent. Waiting for current operations to complete...');
+    } catch (err) {
+      console.error('Abort error:', err);
+      setError('Failed to abort download');
+    }
+  };
+
+  const handleRetryFailed = async () => {
+    if (!currentJobId || failedFilesCount === 0) return;
+
+    setError('');
+    setIsDownloading(true);
+
+    try {
+      const retryResponse = await axios.post(`${API_BASE}/api/retryFailedFiles/${currentJobId}`, {
+        ssoid
+      });
+
+      if (!retryResponse.data.newJobId) {
+        setSuccess('No failed files to retry');
+        setIsDownloading(false);
+        return;
+      }
+
+      const newJobId = retryResponse.data.newJobId;
+      setCurrentJobId(newJobId);
+      setDownloadComplete(false);
+
+      // Connect to SSE stream for retry job
+      const eventSource = new EventSource(`${API_BASE}/api/streamDownload/${newJobId}`);
+      eventSourceRef.current = eventSource;
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          switch (data.type) {
+            case 'start':
+              setSuccess(`Retrying ${data.totalFiles} failed files...`);
+              setDownloadProgress({
+                completed: 0,
+                failed: 0,
+                total: data.totalFiles,
+                percent: 0,
+                currentFile: null,
+                isRetry: true
+              });
+              break;
+
+            case 'progress':
+              setDownloadProgress({
+                completed: data.completed,
+                failed: data.failed,
+                total: data.total,
+                percent: data.percent,
+                currentFile: data.currentFile,
+                isRetry: true
+              });
+              setFailedFilesCount(data.failed);
+              break;
+
+            case 'complete':
+              setDownloadProgress({
+                completed: data.completed,
+                failed: data.failed,
+                total: data.total,
+                percent: 100,
+                currentFile: null,
+                bucket: data.bucket,
+                isRetry: true
+              });
+              setDownloadComplete(true);
+              setIsDownloading(false);
+              setSuccess(`Retry complete! ${data.completed} files recovered, ${data.failed} still failed.`);
+              eventSource.close();
+              eventSourceRef.current = null;
+              break;
+
+            case 'error':
+              setError(`Retry error: ${data.message}`);
+              setIsDownloading(false);
+              eventSource.close();
+              eventSourceRef.current = null;
+              break;
+
+            default:
+              console.log('Unknown event type:', data.type);
+          }
+        } catch (e) {
+          console.error('Error parsing SSE data:', e);
+        }
+      };
+
+      eventSource.onerror = () => {
+        setIsDownloading(false);
+      };
+
+    } catch (err) {
+      console.error('Retry error:', err);
+      setError(`Retry failed: ${err.message}`);
+      setIsDownloading(false);
     }
   };
 
@@ -246,7 +396,7 @@ export default function App() {
       <div className="app">
         <div className="image-bg"></div>
         <div className="login-overlay"></div>
-        
+
         <div className="login-screen">
           <div className="glass-panel login-panel">
             <div className="logo-section">
@@ -300,12 +450,18 @@ export default function App() {
           <button
             className="button-logout"
             onClick={() => {
+              if (eventSourceRef.current) {
+                eventSourceRef.current.close();
+              }
               setIsLoggedIn(false);
               setSsoid('');
               setHasChecked(false);
               setFileCount(0);
               setTotalSizeMB(0);
+              setDownloadProgress(null);
+              setIsDownloading(false);
             }}
+            disabled={isDownloading}
           >
             Logout
           </button>
@@ -318,7 +474,7 @@ export default function App() {
           <div className="main-container">
             <div className="glass-panel control-panel">
               <h2 className="panel-title">Select Date Range</h2>
-              
+
               <div className="date-section">
                 <div className="date-group">
                   <label className="date-label">From</label>
@@ -327,6 +483,7 @@ export default function App() {
                       className="date-select"
                       value={fromMonth}
                       onChange={handleDateChange(setFromMonth)}
+                      disabled={isDownloading}
                     >
                       {MONTHS.map((m, i) => (
                         <option key={i} value={i + 1}>
@@ -338,6 +495,7 @@ export default function App() {
                       className="date-select"
                       value={fromYear}
                       onChange={handleDateChange(setFromYear)}
+                      disabled={isDownloading}
                     >
                       {YEARS.map((y) => (
                         <option key={y} value={y}>
@@ -355,6 +513,7 @@ export default function App() {
                       className="date-select"
                       value={toMonth}
                       onChange={handleDateChange(setToMonth)}
+                      disabled={isDownloading}
                     >
                       {MONTHS.map((m, i) => (
                         <option key={i} value={i + 1}>
@@ -366,6 +525,7 @@ export default function App() {
                       className="date-select"
                       value={toYear}
                       onChange={handleDateChange(setToYear)}
+                      disabled={isDownloading}
                     >
                       {YEARS.map((y) => (
                         <option key={y} value={y}>
@@ -387,11 +547,10 @@ export default function App() {
                     setHasChecked(false);
                     setFileCount(0);
                     setTotalSizeMB(0);
-                    setDownloadStats(null);
-                    setAllFilePaths([]);
-                    setDownloadedSoFar(0);
-                    setCurrentBatch(0);
+                    setDownloadProgress(null);
+                    setDownloadComplete(false);
                   }}
+                  disabled={isDownloading}
                 >
                   {DATA_TIERS.map((tier) => (
                     <option key={tier.value} value={tier.value}>
@@ -407,26 +566,26 @@ export default function App() {
               <div className="preset-values">
                 <div className="preset-item">
                   <span className="preset-label">Sport:</span>
-                  <span className="preset-value">Horse Racing ✓</span>
+                  <span className="preset-value">Horse Racing</span>
                 </div>
                 <div className="preset-item">
                   <span className="preset-label">Country:</span>
-                  <span className="preset-value">GB ✓</span>
+                  <span className="preset-value">GB</span>
                 </div>
                 <div className="preset-item">
                   <span className="preset-label">File Types:</span>
-                  <span className="preset-value">M & E ✓</span>
+                  <span className="preset-value">M & E</span>
                 </div>
                 <div className="preset-item">
                   <span className="preset-label">Market Types:</span>
-                  <span className="preset-value">All ✓</span>
+                  <span className="preset-value">All</span>
                 </div>
               </div>
 
               <button
                 className="button-check"
                 onClick={handleCheckAvailability}
-                disabled={loading}
+                disabled={loading || isDownloading}
               >
                 {loading ? 'Checking...' : 'Check File Availability'}
               </button>
@@ -449,54 +608,100 @@ export default function App() {
                   </div>
                 </div>
 
-                {fileCount > 500 && (
-                  <div className="batch-warning">
-                    ⚠️ Large dataset: Will download first 500 files per batch
+                {/* Progress Section */}
+                {downloadProgress && (
+                  <div className="progress-section">
+                    <div className="progress-header">
+                      <span className="progress-title">
+                        {downloadProgress.isRetry ? 'Retry Progress' : 'Download Progress'}
+                      </span>
+                      <span className="progress-percent">{downloadProgress.percent}%</span>
+                    </div>
+                    <div className="progress-bar-container">
+                      <div
+                        className="progress-bar"
+                        style={{ width: `${downloadProgress.percent}%` }}
+                      />
+                    </div>
+                    <div className="progress-details">
+                      <div className="progress-stat">
+                        <span className="stat-label">Completed:</span>
+                        <span className="stat-value success">{downloadProgress.completed.toLocaleString()}</span>
+                      </div>
+                      <div className="progress-stat">
+                        <span className="stat-label">Failed:</span>
+                        <span className="stat-value error">{downloadProgress.failed.toLocaleString()}</span>
+                      </div>
+                      <div className="progress-stat">
+                        <span className="stat-label">Total:</span>
+                        <span className="stat-value">{downloadProgress.total.toLocaleString()}</span>
+                      </div>
+                    </div>
+                    {downloadProgress.currentFile && isDownloading && (
+                      <div className="current-file">
+                        Processing: {downloadProgress.currentFile}
+                      </div>
+                    )}
                   </div>
                 )}
 
+                {/* Download Controls */}
                 <div className="download-section">
-                  <button
-                    className="button-download"
-                    onClick={handleDownload}
-                    disabled={loading}
-                  >
-                    {loading ? 'Uploading to Cloud...' :
-                      downloadStats && downloadStats.remainingFiles > 0
-                        ? `☁️ Upload Next Batch (${Math.min(BATCH_SIZE, downloadStats.remainingFiles)} files)`
-                        : downloadStats && downloadStats.remainingFiles === 0
-                          ? '✓ All Uploaded'
-                          : '☁️ Upload to Cloud Storage'
-                    }
-                  </button>
+                  {!isDownloading && !downloadComplete && (
+                    <button
+                      className="button-download"
+                      onClick={handleStartDownload}
+                      disabled={loading}
+                    >
+                      Start Download to Cloud Storage
+                    </button>
+                  )}
+
+                  {isDownloading && (
+                    <button
+                      className="button-abort"
+                      onClick={handleAbortDownload}
+                    >
+                      Abort Download
+                    </button>
+                  )}
+
+                  {downloadComplete && failedFilesCount > 0 && (
+                    <button
+                      className="button-retry"
+                      onClick={handleRetryFailed}
+                      disabled={isDownloading}
+                    >
+                      Retry {failedFilesCount} Failed Files
+                    </button>
+                  )}
+
+                  {downloadComplete && failedFilesCount === 0 && (
+                    <div className="download-complete">
+                      All files uploaded successfully!
+                    </div>
+                  )}
                 </div>
 
-                {downloadStats && (
+                {/* Stats Summary */}
+                {downloadProgress && downloadProgress.bucket && (
                   <div className="download-stats">
-                    <h3>Upload Progress</h3>
+                    <h3>Upload Summary</h3>
                     <div className="stats-row">
                       <span>Destination:</span>
-                      <span>gs://{downloadStats.bucket}/</span>
+                      <span>gs://{downloadProgress.bucket}/</span>
                     </div>
                     <div className="stats-row">
                       <span>Date Range:</span>
-                      <span>{downloadStats.dateRange}</span>
+                      <span>{MONTHS[parseInt(fromMonth)-1]} {fromYear} - {MONTHS[parseInt(toMonth)-1]} {toYear}</span>
                     </div>
                     <div className="stats-row">
-                      <span>Batch:</span>
-                      <span>{downloadStats.batchNumber} of {downloadStats.totalBatches}</span>
+                      <span>Files Uploaded:</span>
+                      <span>{downloadProgress.completed.toLocaleString()}</span>
                     </div>
                     <div className="stats-row">
-                      <span>This Batch:</span>
-                      <span>{downloadStats.filesDownloaded} uploaded, {downloadStats.filesFailed} failed</span>
-                    </div>
-                    <div className="stats-row">
-                      <span>Total Progress:</span>
-                      <span>{downloadStats.totalDownloaded} of {downloadStats.totalAvailable} files</span>
-                    </div>
-                    <div className="stats-row">
-                      <span>Remaining:</span>
-                      <span>{downloadStats.remainingFiles} files</span>
+                      <span>Files Failed:</span>
+                      <span>{downloadProgress.failed.toLocaleString()}</span>
                     </div>
                   </div>
                 )}
