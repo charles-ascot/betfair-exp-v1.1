@@ -591,7 +591,7 @@ export default function App() {
                 </div>
                 <div className="preset-item">
                   <span className="preset-label">File Types:</span>
-                  <span className="preset-value">M & E</span>
+                  <span className="preset-value">M</span>
                 </div>
                 <div className="preset-item">
                   <span className="preset-label">Market Types:</span>
