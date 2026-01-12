@@ -32,7 +32,8 @@ export default function App() {
   // Pre-selected defaults (hardcoded)
   const selectedMarkets = []; // All market types
   const selectedCountries = ['GB', 'IE']; // GB and Ireland
-  const selectedFileTypes = ['M', 'E']; // Both M and E
+  // Market files only - Event files contain duplicate data
+  const selectedFileTypes = ['M'];
 
   const [fileCount, setFileCount] = useState(0);
   const [totalSizeMB, setTotalSizeMB] = useState(0);
