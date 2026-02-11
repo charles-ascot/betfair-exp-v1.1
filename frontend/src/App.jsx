@@ -5,7 +5,7 @@ import './App.css';
 const API_BASE = 'https://betfair-backend-1026419041222.europe-west2.run.app';
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-const YEARS = Array.from({ length: 10 }, (_, i) => 2024 - i);
+const YEARS = Array.from({ length: 26 }, (_, i) => 2015 + i); // 2015–2040
 
 export default function App() {
   const [introComplete, setIntroComplete] = useState(false);
