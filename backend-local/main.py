@@ -14,6 +14,9 @@ import collections
 import contextlib
 from datetime import datetime
 from google.cloud import storage
+from google.auth.transport.requests import AuthorizedSession
+import google.auth
+import requests as req_lib
 from concurrent.futures import ThreadPoolExecutor
 import functools
 
@@ -87,7 +90,13 @@ async def startup_event():
     )
     # Initialize GCS client
     try:
-        gcs_client = storage.Client(project=GCS_PROJECT_ID)
+        # Increase urllib3 pool size to match ThreadPoolExecutor workers
+        credentials, project = google.auth.default()
+        adapter = req_lib.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+        authed_session = AuthorizedSession(credentials)
+        authed_session.mount("https://", adapter)
+        authed_session.mount("http://", adapter)
+        gcs_client = storage.Client(project=GCS_PROJECT_ID, _http=authed_session)
         logger.info(f"GCS client initialized for project: {GCS_PROJECT_ID}")
         logger.info(f"GCS bucket: {GCS_BUCKET_NAME}")
     except Exception as e:
@@ -100,7 +109,7 @@ async def startup_event():
     logger.info("Betfair Historic Data Explorer Starting...")
     logger.info(f"Historic Data API Base: {HISTORIC_DATA_BASE}")
 
-async def make_request_with_retry(method, url, headers, json=None, max_retries=2):
+async def make_request_with_retry(method, url, headers, json=None, max_retries=3):
     """Make HTTP request with retry logic"""
     last_error = None
     for attempt in range(max_retries + 1):
@@ -110,8 +119,9 @@ async def make_request_with_retry(method, url, headers, json=None, max_retries=2
             else:
                 response = await http_client.post(url, headers=headers, json=json)
 
-            # If we get a valid response (even error), return it
-            if response.status_code != 502 and response.status_code != 503:
+            # Retry on server errors (500, 502, 503) and HTML error pages
+            is_html = '<html' in response.text[:500].lower() or '<!doctype' in response.text[:500].lower()
+            if response.status_code not in (500, 502, 503) and not is_html:
                 return response
 
             logger.warning(f"Attempt {attempt + 1} failed with {response.status_code}, retrying...")
