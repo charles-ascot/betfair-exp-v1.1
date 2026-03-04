@@ -10,6 +10,8 @@ import zipfile
 import io
 import json
 import uuid
+import collections
+import contextlib
 from datetime import datetime
 from google.cloud import storage
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +19,37 @@ import functools
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ── In-memory log buffer + SSE broadcast ─────────────────────────────────────
+log_buffer: collections.deque = collections.deque(maxlen=500)
+log_subscribers: list = []
+
+class _SseBroadcastHandler(logging.Handler):
+    """Captures every log record and fans it out to all active SSE subscribers."""
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            entry = {
+                "ts": datetime.fromtimestamp(record.created).strftime("%H:%M:%S.%f")[:-3],
+                "level": record.levelname,
+                "msg": self.format(record),
+            }
+            log_buffer.append(entry)
+            dead = []
+            for q in log_subscribers:
+                try:
+                    q.put_nowait(entry)
+                except Exception:
+                    dead.append(q)
+            for q in dead:
+                with contextlib.suppress(ValueError):
+                    log_subscribers.remove(q)
+        except Exception:
+            pass  # Never let logging errors crash the app
+
+_sse_handler = _SseBroadcastHandler()
+_sse_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+logging.getLogger().addHandler(_sse_handler)
+# ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI()
 
@@ -1063,3 +1096,35 @@ async def retry_failed_files(job_id: str, data: dict):
     logger.info(f"Created retry job {new_job_id} with {len(file_paths)} files from job {job_id}")
 
     return {"success": True, "newJobId": new_job_id, "totalFiles": len(file_paths)}
+
+
+@app.get("/api/streamLogs")
+async def stream_logs():
+    """
+    SSE endpoint — streams backend log lines in real time.
+    On connect, replays the last 500 buffered lines then tails live entries.
+    """
+    queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+    log_subscribers.append(queue)
+
+    async def generator():
+        # Replay buffered history so the panel isn't empty on open
+        for entry in list(log_buffer):
+            yield f"data: {json.dumps(entry)}\n\n"
+        # Stream new entries as they arrive
+        try:
+            while True:
+                try:
+                    entry = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    yield f"data: {json.dumps(entry)}\n\n"
+                except asyncio.TimeoutError:
+                    yield 'data: {"type":"keepalive"}\n\n'
+        finally:
+            with contextlib.suppress(ValueError):
+                log_subscribers.remove(queue)
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

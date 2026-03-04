@@ -47,14 +47,51 @@ export default function App() {
   const [downloadComplete, setDownloadComplete] = useState(false);
   const eventSourceRef = useRef(null);
 
+  // Live log panel state
+  const [showLogs, setShowLogs] = useState(false);
+  const [logLines, setLogLines] = useState([]);
+  const logEventSourceRef = useRef(null);
+  const logPanelRef = useRef(null);
+
   // Clean up EventSource on unmount
   useEffect(() => {
     return () => {
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
       }
+      if (logEventSourceRef.current) {
+        logEventSourceRef.current.close();
+      }
     };
   }, []);
+
+  // Connect / disconnect log SSE when panel is toggled
+  useEffect(() => {
+    if (isLoggedIn && showLogs) {
+      if (logEventSourceRef.current) logEventSourceRef.current.close();
+      const es = new EventSource(`${API_BASE}/api/streamLogs`);
+      logEventSourceRef.current = es;
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'keepalive') return;
+          setLogLines(prev => [...prev.slice(-499), data]);
+        } catch (e) {}
+      };
+    } else {
+      if (logEventSourceRef.current) {
+        logEventSourceRef.current.close();
+        logEventSourceRef.current = null;
+      }
+    }
+  }, [isLoggedIn, showLogs]);
+
+  // Auto-scroll log panel to bottom on new lines
+  useEffect(() => {
+    if (logPanelRef.current) {
+      logPanelRef.current.scrollTop = logPanelRef.current.scrollHeight;
+    }
+  }, [logLines]);
 
   // Clear results when date range changes
   const handleDateChange = (setter) => (e) => {
@@ -464,24 +501,33 @@ export default function App() {
             <h1 className="header-title">Ascot Wealth Management</h1>
             <p className="header-subtitle">Betfair Historic Data Explorer</p>
           </div>
-          <button
-            className="button-logout"
-            onClick={() => {
-              if (eventSourceRef.current) {
-                eventSourceRef.current.close();
-              }
-              setIsLoggedIn(false);
-              setSsoid('');
-              setHasChecked(false);
-              setFileCount(0);
-              setTotalSizeMB(0);
-              setDownloadProgress(null);
-              setIsDownloading(false);
-            }}
-            disabled={isDownloading}
-          >
-            Logout
-          </button>
+          <div className="header-actions">
+            <button
+              className={`button-logs ${showLogs ? 'active' : ''}`}
+              onClick={() => setShowLogs(prev => !prev)}
+            >
+              {showLogs ? '▼ Hide Logs' : '▲ Live Logs'}
+            </button>
+            <button
+              className="button-logout"
+              onClick={() => {
+                if (eventSourceRef.current) eventSourceRef.current.close();
+                if (logEventSourceRef.current) logEventSourceRef.current.close();
+                setIsLoggedIn(false);
+                setSsoid('');
+                setHasChecked(false);
+                setFileCount(0);
+                setTotalSizeMB(0);
+                setDownloadProgress(null);
+                setIsDownloading(false);
+                setShowLogs(false);
+                setLogLines([]);
+              }}
+              disabled={isDownloading}
+            >
+              Logout
+            </button>
+          </div>
         </div>
 
         <div className="content">
@@ -755,6 +801,28 @@ export default function App() {
             )}
           </div>
         </div>
+
+        {/* Live Log Panel */}
+        {showLogs && (
+          <div className="log-panel">
+            <div className="log-panel-header">
+              <span>☁ Cloud Run — Live Logs</span>
+              <button className="log-clear-btn" onClick={() => setLogLines([])}>Clear</button>
+            </div>
+            <div className="log-lines" ref={logPanelRef}>
+              {logLines.length === 0 && (
+                <div className="log-line log-info">Waiting for log entries...</div>
+              )}
+              {logLines.map((line, i) => (
+                <div key={i} className={`log-line log-${(line.level || 'INFO').toLowerCase()}`}>
+                  <span className="log-ts">{line.ts}</span>
+                  <span className="log-level">{line.level}</span>
+                  <span className="log-msg">{line.msg}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
