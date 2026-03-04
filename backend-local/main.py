@@ -316,6 +316,8 @@ async def download_list_of_files(filter_data: dict):
             "toDay": int(filter_data.get("toDay", 31)),
             "toMonth": int(filter_data.get("toMonth", 12)),
             "toYear": int(filter_data.get("toYear", 2024)),
+            "eventId": filter_data.get("eventId", None),
+            "eventName": filter_data.get("eventName", None),
             "marketTypesCollection": filter_data.get("marketTypesCollection", []),
             "countriesCollection": filter_data.get("countriesCollection", []),
             "fileTypeCollection": filter_data.get("fileTypeCollection", [])
