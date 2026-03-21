@@ -912,11 +912,24 @@ async def stream_download(job_id: str):
                 "Content-Type": "application/json"
             }
 
+            # Pre-fetch all existing GCS blobs in one list call.
+            # This replaces ~33k individual blob.exists()+reload() calls with a single
+            # list_blobs() request, which is the main performance bottleneck for large jobs.
+            yield f"data: {json.dumps({'type': 'progress', 'completed': 0, 'failed': 0, 'skipped': 0, 'total': len(file_paths), 'percent': 0, 'currentFile': 'Scanning GCS bucket...'})}\n\n"
+            logger.info(f"Pre-fetching existing GCS blobs for job {job_id}...")
+            loop = asyncio.get_event_loop()
+            existing_blobs = await loop.run_in_executor(
+                thread_executor,
+                lambda: {b.name: b.size for b in bucket.list_blobs()}
+            )
+            logger.info(f"Found {len(existing_blobs)} existing blobs in GCS")
+
             # Send initial event with request params for verification
             yield f"data: {json.dumps({'type': 'start', 'totalFiles': len(file_paths), 'jobId': job_id, 'requestParams': job.get('requestParams', {})})}\n\n"
 
-            # Process files with higher concurrency (25 concurrent)
-            semaphore = asyncio.Semaphore(25)
+            # Basic Plan has strict rate limits — keep concurrency low to avoid 429s.
+            # Advanced/Pro can go higher but 5 is safe for all tiers.
+            semaphore = asyncio.Semaphore(5)
             completed = 0
             failed = 0
             skipped = 0
@@ -933,20 +946,11 @@ async def stream_download(job_id: str):
 
                     job["currentFile"] = path.split('/')[-1]
 
-                    # Check if file already exists in GCS AND is valid - SKIP only if complete
+                    # Check against pre-fetched GCS blob set — no API call needed.
                     gcs_path = get_gcs_path_from_betfair_path(path)
-                    try:
-                        loop = asyncio.get_event_loop()
-                        exists_and_valid = await loop.run_in_executor(
-                            thread_executor,
-                            functools.partial(check_blob_exists_and_valid_sync, bucket, gcs_path, 100)
-                        )
-                        if exists_and_valid:
-                            logger.debug(f"Skipping existing valid file: {gcs_path}")
-                            return {"success": True, "path": path, "skipped": True}
-                    except Exception as check_err:
-                        logger.warning(f"Error checking if {gcs_path} exists: {check_err}")
-                        # Continue with download if check fails
+                    if existing_blobs.get(gcs_path, 0) >= 100:
+                        logger.debug(f"Skipping existing valid file: {gcs_path}")
+                        return {"success": True, "path": path, "skipped": True}
 
                     encoded_path = urllib.parse.quote(path, safe='')
                     download_url = f"{HISTORIC_DATA_BASE}/DownloadFile?filePath={encoded_path}"
