@@ -927,9 +927,7 @@ async def stream_download(job_id: str):
             # Send initial event with request params for verification
             yield f"data: {json.dumps({'type': 'start', 'totalFiles': len(file_paths), 'jobId': job_id, 'requestParams': job.get('requestParams', {})})}\n\n"
 
-            # Basic Plan has strict rate limits — keep concurrency low to avoid 429s.
-            # Advanced/Pro can go higher but 5 is safe for all tiers.
-            semaphore = asyncio.Semaphore(5)
+            semaphore = asyncio.Semaphore(25)
             completed = 0
             failed = 0
             skipped = 0
