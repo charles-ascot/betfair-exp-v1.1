@@ -57,3 +57,8 @@ uvicorn main:app --reload
 
 - **Frontend** auto-deploys to GitHub Pages on push to `main`
 - **Backend** auto-deploys to Google Cloud Run on push to `main`
+
+## Changelog
+
+### 2026-03-25
+- Fixed 500 error on `getAdvBasketDataSize` and `GetCollectionOptions` endpoints — Betfair's Historical Data API throws a .NET Runtime Error when `null` is sent for `eventId`/`eventName` fields. These fields are now omitted from the request body unless they carry an actual value.
