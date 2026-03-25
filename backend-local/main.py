@@ -210,13 +210,11 @@ async def get_collection_options(filter_data: dict):
             "toDay": int(filter_data.get("toDay", 31)),
             "toMonth": int(filter_data.get("toMonth", 12)),
             "toYear": int(filter_data.get("toYear", 2024)),
-            "eventId": None,
-            "eventName": None,
             "marketTypesCollection": filter_data.get("marketTypesCollection", []),
             "countriesCollection": filter_data.get("countriesCollection", []),
             "fileTypeCollection": filter_data.get("fileTypeCollection", [])
         }
-        
+
         logger.info(f"GetCollectionOptions request")
 
         response = await make_request_with_retry(
@@ -263,12 +261,16 @@ async def get_adv_basket_data_size(filter_data: dict):
             "toDay": int(filter_data.get("toDay", 31)),
             "toMonth": int(filter_data.get("toMonth", 12)),
             "toYear": int(filter_data.get("toYear", 2024)),
-            "eventId": None,
-            "eventName": None,
             "marketTypesCollection": filter_data.get("marketTypesCollection", []),
             "countriesCollection": filter_data.get("countriesCollection", []),
             "fileTypeCollection": filter_data.get("fileTypeCollection", [])
         }
+        event_id = filter_data.get("eventId")
+        event_name = filter_data.get("eventName")
+        if event_id is not None:
+            request_body["eventId"] = event_id
+        if event_name is not None:
+            request_body["eventName"] = event_name
 
         logger.info(f"GetAdvBasketDataSize request")
 
