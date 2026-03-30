@@ -10,13 +10,49 @@ import zipfile
 import io
 import json
 import uuid
+import collections
+import contextlib
 from datetime import datetime
 from google.cloud import storage
+from google.auth.transport.requests import AuthorizedSession
+import google.auth
+import requests as req_lib
 from concurrent.futures import ThreadPoolExecutor
 import functools
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ── In-memory log buffer + SSE broadcast ─────────────────────────────────────
+log_buffer: collections.deque = collections.deque(maxlen=500)
+log_subscribers: list = []
+
+class _SseBroadcastHandler(logging.Handler):
+    """Captures every log record and fans it out to all active SSE subscribers."""
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            entry = {
+                "ts": datetime.fromtimestamp(record.created).strftime("%H:%M:%S.%f")[:-3],
+                "level": record.levelname,
+                "msg": self.format(record),
+            }
+            log_buffer.append(entry)
+            dead = []
+            for q in log_subscribers:
+                try:
+                    q.put_nowait(entry)
+                except Exception:
+                    dead.append(q)
+            for q in dead:
+                with contextlib.suppress(ValueError):
+                    log_subscribers.remove(q)
+        except Exception:
+            pass  # Never let logging errors crash the app
+
+_sse_handler = _SseBroadcastHandler()
+_sse_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+logging.getLogger().addHandler(_sse_handler)
+# ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI()
 
@@ -55,7 +91,13 @@ async def startup_event():
     )
     # Initialize GCS client
     try:
-        gcs_client = storage.Client(project=GCS_PROJECT_ID)
+        # Increase urllib3 pool size to match ThreadPoolExecutor workers
+        credentials, project = google.auth.default()
+        adapter = req_lib.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+        authed_session = AuthorizedSession(credentials)
+        authed_session.mount("https://", adapter)
+        authed_session.mount("http://", adapter)
+        gcs_client = storage.Client(project=GCS_PROJECT_ID, _http=authed_session)
         logger.info(f"GCS client initialized for project: {GCS_PROJECT_ID}")
         logger.info(f"GCS bucket: {GCS_BUCKET_NAME}")
     except Exception as e:
@@ -68,7 +110,7 @@ async def startup_event():
     logger.info("Betfair Historic Data Explorer Starting...")
     logger.info(f"Historic Data API Base: {HISTORIC_DATA_BASE}")
 
-async def make_request_with_retry(method, url, headers, json=None, max_retries=2):
+async def make_request_with_retry(method, url, headers, json=None, max_retries=3):
     """Make HTTP request with retry logic"""
     last_error = None
     for attempt in range(max_retries + 1):
@@ -78,8 +120,9 @@ async def make_request_with_retry(method, url, headers, json=None, max_retries=2
             else:
                 response = await http_client.post(url, headers=headers, json=json)
 
-            # If we get a valid response (even error), return it
-            if response.status_code != 502 and response.status_code != 503:
+            # Retry on server errors (500, 502, 503) and HTML error pages
+            is_html = '<html' in response.text[:500].lower() or '<!doctype' in response.text[:500].lower()
+            if response.status_code not in (500, 502, 503) and not is_html:
                 return response
 
             logger.warning(f"Attempt {attempt + 1} failed with {response.status_code}, retrying...")
@@ -168,13 +211,11 @@ async def get_collection_options(filter_data: dict):
             "toDay": int(filter_data.get("toDay", 31)),
             "toMonth": int(filter_data.get("toMonth", 12)),
             "toYear": int(filter_data.get("toYear", 2024)),
-            "eventId": None,
-            "eventName": None,
             "marketTypesCollection": filter_data.get("marketTypesCollection", []),
             "countriesCollection": filter_data.get("countriesCollection", []),
             "fileTypeCollection": filter_data.get("fileTypeCollection", [])
         }
-        
+
         logger.info(f"GetCollectionOptions request")
 
         response = await make_request_with_retry(
@@ -221,12 +262,16 @@ async def get_adv_basket_data_size(filter_data: dict):
             "toDay": int(filter_data.get("toDay", 31)),
             "toMonth": int(filter_data.get("toMonth", 12)),
             "toYear": int(filter_data.get("toYear", 2024)),
-            "eventId": None,
-            "eventName": None,
             "marketTypesCollection": filter_data.get("marketTypesCollection", []),
             "countriesCollection": filter_data.get("countriesCollection", []),
             "fileTypeCollection": filter_data.get("fileTypeCollection", [])
         }
+        event_id = filter_data.get("eventId")
+        event_name = filter_data.get("eventName")
+        if event_id is not None:
+            request_body["eventId"] = event_id
+        if event_name is not None:
+            request_body["eventName"] = event_name
 
         logger.info(f"GetAdvBasketDataSize request")
 
@@ -284,6 +329,8 @@ async def download_list_of_files(filter_data: dict):
             "toDay": int(filter_data.get("toDay", 31)),
             "toMonth": int(filter_data.get("toMonth", 12)),
             "toYear": int(filter_data.get("toYear", 2024)),
+            "eventId": filter_data.get("eventId", None),
+            "eventName": filter_data.get("eventName", None),
             "marketTypesCollection": filter_data.get("marketTypesCollection", []),
             "countriesCollection": filter_data.get("countriesCollection", []),
             "fileTypeCollection": filter_data.get("fileTypeCollection", [])
@@ -868,10 +915,21 @@ async def stream_download(job_id: str):
                 "Content-Type": "application/json"
             }
 
+            # Pre-fetch all existing GCS blobs in one list call.
+            # This replaces ~33k individual blob.exists()+reload() calls with a single
+            # list_blobs() request, which is the main performance bottleneck for large jobs.
+            yield f"data: {json.dumps({'type': 'progress', 'completed': 0, 'failed': 0, 'skipped': 0, 'total': len(file_paths), 'percent': 0, 'currentFile': 'Scanning GCS bucket...'})}\n\n"
+            logger.info(f"Pre-fetching existing GCS blobs for job {job_id}...")
+            loop = asyncio.get_event_loop()
+            existing_blobs = await loop.run_in_executor(
+                thread_executor,
+                lambda: {b.name: b.size for b in bucket.list_blobs()}
+            )
+            logger.info(f"Found {len(existing_blobs)} existing blobs in GCS")
+
             # Send initial event with request params for verification
             yield f"data: {json.dumps({'type': 'start', 'totalFiles': len(file_paths), 'jobId': job_id, 'requestParams': job.get('requestParams', {})})}\n\n"
 
-            # Process files with higher concurrency (25 concurrent)
             semaphore = asyncio.Semaphore(25)
             completed = 0
             failed = 0
@@ -889,20 +947,11 @@ async def stream_download(job_id: str):
 
                     job["currentFile"] = path.split('/')[-1]
 
-                    # Check if file already exists in GCS AND is valid - SKIP only if complete
+                    # Check against pre-fetched GCS blob set — no API call needed.
                     gcs_path = get_gcs_path_from_betfair_path(path)
-                    try:
-                        loop = asyncio.get_event_loop()
-                        exists_and_valid = await loop.run_in_executor(
-                            thread_executor,
-                            functools.partial(check_blob_exists_and_valid_sync, bucket, gcs_path, 100)
-                        )
-                        if exists_and_valid:
-                            logger.debug(f"Skipping existing valid file: {gcs_path}")
-                            return {"success": True, "path": path, "skipped": True}
-                    except Exception as check_err:
-                        logger.warning(f"Error checking if {gcs_path} exists: {check_err}")
-                        # Continue with download if check fails
+                    if existing_blobs.get(gcs_path, 0) >= 100:
+                        logger.debug(f"Skipping existing valid file: {gcs_path}")
+                        return {"success": True, "path": path, "skipped": True}
 
                     encoded_path = urllib.parse.quote(path, safe='')
                     download_url = f"{HISTORIC_DATA_BASE}/DownloadFile?filePath={encoded_path}"
@@ -1064,3 +1113,35 @@ async def retry_failed_files(job_id: str, data: dict):
     logger.info(f"Created retry job {new_job_id} with {len(file_paths)} files from job {job_id}")
 
     return {"success": True, "newJobId": new_job_id, "totalFiles": len(file_paths)}
+
+
+@app.get("/api/streamLogs")
+async def stream_logs():
+    """
+    SSE endpoint — streams backend log lines in real time.
+    On connect, replays the last 500 buffered lines then tails live entries.
+    """
+    queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+    log_subscribers.append(queue)
+
+    async def generator():
+        # Replay buffered history so the panel isn't empty on open
+        for entry in list(log_buffer):
+            yield f"data: {json.dumps(entry)}\n\n"
+        # Stream new entries as they arrive
+        try:
+            while True:
+                try:
+                    entry = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    yield f"data: {json.dumps(entry)}\n\n"
+                except asyncio.TimeoutError:
+                    yield 'data: {"type":"keepalive"}\n\n'
+        finally:
+            with contextlib.suppress(ValueError):
+                log_subscribers.remove(queue)
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
