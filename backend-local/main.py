@@ -24,9 +24,10 @@ app = FastAPI()
 active_downloads = {}  # job_id -> download state
 failed_files_registry = {}  # job_id -> list of failed file paths
 
+_allowed_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://betfair1.thync.online", "http://localhost:5173"],
+    allow_origins=[o.strip() for o in _allowed_origins.split(",")] + ["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
